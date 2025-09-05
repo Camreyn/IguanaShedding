@@ -1,11 +1,12 @@
 ---
-- name: Export AWX environment (test only)
+- name: Export AWX environment from Kubernetes
   hosts: localhost
   gather_facts: no
   vars:
-    awx_env: test    # Options: test or prod, passed in via survey or extra vars
+    awx_env: test
     export_filename: "awx_export_{{ awx_env }}.json"
     awx_host: "{{ groups['awx_' + awx_env][0] }}"
+    awx_namespace: "awx"
 
   tasks:
     - name: Create exports/ dir on control node (task container)
@@ -15,11 +16,19 @@
         mode: "0755"
       become: false
 
-    - name: Export AWX data from {{ environment }} environment
+    - name: Get AWX pod name
       ansible.builtin.shell: |
-        awx-manage export > /tmp/{{ export_filename }}
+        kubectl get pods -n {{ awx_namespace }} -l "app.kubernetes.io/component=task" -o jsonpath="{.items[0].metadata.name}"
+      register: awx_pod
       delegate_to: "{{ awx_host }}"
-      become: yes
+      become: true
+
+    - name: Export AWX data using awx-manage inside the pod
+      ansible.builtin.shell: |
+        kubectl exec -n {{ awx_namespace }} {{ awx_pod.stdout }} -- \
+          awx-manage export > /tmp/{{ export_filename }}
+      delegate_to: "{{ awx_host }}"
+      become: true
 
     - name: Fetch exported AWX data to control node
       ansible.builtin.fetch:
