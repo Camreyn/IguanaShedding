@@ -3,15 +3,17 @@
   hosts: localhost
   gather_facts: no
   vars:
-    environment: test       # Options: test or prod, passed in via survey or --extra-vars
-    export_filename: "awx_export_{{ environment }}.json"
-    awx_host: "{{ groups['awx_' + environment][0] }}"
+    awx_env: test    # Options: test or prod, passed in via survey or extra vars
+    export_filename: "awx_export_{{ awx_env }}.json"
+    awx_host: "{{ groups['awx_' + awx_env][0] }}"
 
   tasks:
-    - name: Create exports/ dir on control node if missing
-      file:
+    - name: Create exports/ dir on control node (task container)
+      ansible.builtin.file:
         path: "exports"
         state: directory
+        mode: "0755"
+      become: false
 
     - name: Export AWX data from {{ environment }} environment
       ansible.builtin.shell: |
@@ -20,18 +22,20 @@
       become: yes
 
     - name: Fetch exported AWX data to control node
-      fetch:
+      ansible.builtin.fetch:
         src: "/tmp/{{ export_filename }}"
         dest: "exports/{{ export_filename }}"
         flat: yes
       delegate_to: "{{ awx_host }}"
+      become: false
 
     - name: Confirm export fetched successfully
-      stat:
+      ansible.builtin.stat:
         path: "exports/{{ export_filename }}"
       register: export_status
+      become: false
 
     - name: Show result
-      debug:
+      ansible.builtin.debug:
         msg: "AWX export was saved to: exports/{{ export_filename }}"
       when: export_status.stat.exists

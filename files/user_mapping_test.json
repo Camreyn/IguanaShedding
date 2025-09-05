@@ -1,0 +1,4 @@
+{
+    "awx_admin": "ldap_admin",
+    "local_deploy": "svc_deploy"
+}

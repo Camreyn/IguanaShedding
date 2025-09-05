@@ -3,11 +3,11 @@
   hosts: pilotserver # make sure the awx server is the sole server in the group "pilotserver", localhost does not fit here.
   gather_facts: no
   vars:
-    environment: test       # pass in with --extra-vars or via AWX survey: "test" or "prod"
-    export_filename: "awx_export_{{ environment }}.json"
-    import_filename: "aap_import_{{ environment }}.json"
-    user_map_filename: "user_mapping_{{ environment }}.json"
-    awx_host: "{{ groups['awx_' + environment][0] }}"
+    awx_env: test       # pass in with --extra-vars or via AWX survey: "test" or "prod"
+    export_filename: "awx_export_{{ awx_env }}.json"
+    import_filename: "aap_import_{{ awx_env }}.json"
+    user_map_filename: "user_mapping_{{ awx_env }}.json"
+    awx_host: "{{ groups['awx_' + awx_env][0] }}"
     aap_host: "{{ groups['aap'][0] }}"
 
   tasks:
@@ -19,7 +19,7 @@
         - exports
         - imports
 
-    - name: Export AWX data from {{ environment }} environment
+    - name: Export AWX data from {{ awx_env }} environment
       ansible.builtin.shell: |
         awx-manage export > /tmp/{{ export_filename }}
       delegate_to: "{{ awx_host }}"

@@ -1,0 +1,7 @@
+{
+    "admin": "ldap_admin",
+    "deploy": "ldap_deploy",
+    "old_user1": "ldap_user_a",
+    "old_user2": "ldap_user_b"
+}
+  
