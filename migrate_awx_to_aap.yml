@@ -1,0 +1,60 @@
+---
+- name: Export from AWX, Convert, and Import into AAP
+  hosts: pilotserver # make sure the awx server is the sole server in the group "pilotserver", localhost does not fit here.
+  gather_facts: no
+  vars:
+    environment: test       # pass in with --extra-vars or via AWX survey: "test" or "prod"
+    export_filename: "awx_export_{{ environment }}.json"
+    import_filename: "aap_import_{{ environment }}.json"
+    user_map_filename: "user_mapping_{{ environment }}.json"
+    awx_host: "{{ groups['awx_' + environment][0] }}"
+    aap_host: "{{ groups['aap'][0] }}"
+
+  tasks:
+    - name: Create exports and imports dirs if needed
+      file:
+        path: "{{ item }}"
+        state: directory
+      loop:
+        - exports
+        - imports
+
+    - name: Export AWX data from {{ environment }} environment
+      ansible.builtin.shell: |
+        awx-manage export > /tmp/{{ export_filename }}
+      delegate_to: "{{ awx_host }}"
+
+    - name: Fetch exported AWX data to control node
+      fetch:
+        src: "/tmp/{{ export_filename }}"
+        dest: "exports/{{ export_filename }}"
+        flat: yes
+      delegate_to: "{{ awx_host }}"
+
+    - name: Copy Python script and user mapping to control node workspace
+      copy:
+        src: "{{ item }}"
+        dest: "./"
+      loop:
+        - "files/migrate_awx_to_aap.py"
+        - "files/{{ user_map_filename }}"
+
+    - name: Run local conversion script
+      command: >
+        python3 migrate_awx_to_aap.py
+        --input exports/{{ export_filename }}
+        --output imports/{{ import_filename }}
+        --mapping {{ user_map_filename }}
+        --strip-local-users
+
+    - name: Copy cleaned import file to AAP host
+      copy:
+        src: "imports/{{ import_filename }}"
+        dest: "/tmp/{{ import_filename }}"
+      delegate_to: "{{ aap_host }}"
+
+# Uncomment this part of the playbook when you are confident that the tests are completed.
+#    - name: Import transformed data into AAP
+#      ansible.builtin.shell: |
+#        awx-manage import < /tmp/{{ import_filename }}
+#      delegate_to: "{{ aap_host }}"

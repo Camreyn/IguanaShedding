@@ -1,0 +1,23 @@
+---
+- name: Test if awx-manage is available
+  hosts: pilotserver
+  gather_facts: no
+  tasks:
+
+    - name: Check if awx-manage is in PATH
+      ansible.builtin.command: which awx-manage
+      register: manage_path
+      ignore_errors: yes
+
+    - name: Show awx-manage path
+      ansible.builtin.debug:
+        var: manage_path.stdout
+
+    - name: Try to run awx-manage help
+      ansible.builtin.command: awx-manage help
+      register: help_output
+      ignore_errors: yes
+
+    - name: Print awx-manage help output
+      ansible.builtin.debug:
+        var: help_output.stdout_lines
