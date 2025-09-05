@@ -3,27 +3,29 @@
   hosts: localhost
   gather_facts: no
   vars:
-    awx_env: test
+    awx_env: test  # Accepts: test or prod
     export_filename: "awx_export_{{ awx_env }}.json"
     awx_host: "{{ groups['awx_' + awx_env][0] }}"
     awx_namespace: "awx"
 
   tasks:
-    - name: Create exports/ dir on control node (task container)
+    - name: Create exports/ dir on control node (AWX execution container)
       ansible.builtin.file:
         path: "exports"
         state: directory
         mode: "0755"
       become: false
 
-    - name: Get AWX pod name
+    - name: Get AWX task pod name (for awx-manage)
       ansible.builtin.shell: |
-        kubectl get pods -n {{ awx_namespace }} -l "app.kubernetes.io/component=task" -o jsonpath="{.items[0].metadata.name}"
+        kubectl get pods -n {{ awx_namespace }} \
+          --no-headers -o custom-columns=":metadata.name" \
+        | grep task
       register: awx_pod
       delegate_to: "{{ awx_host }}"
       become: true
 
-    - name: Export AWX data using awx-manage inside the pod
+    - name: Export AWX data using awx-manage inside the task pod
       ansible.builtin.shell: |
         kubectl exec -n {{ awx_namespace }} {{ awx_pod.stdout }} -- \
           awx-manage export > /tmp/{{ export_filename }}
