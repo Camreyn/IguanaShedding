@@ -1,7 +1,5 @@
 # IguanaShedding
 
-Certainly. Here's a professional and concise `README.md` tailored for your **AWX-to-AAP migration project**, compatible with being run directly from AWX:
-
 ---
 
 ```markdown
