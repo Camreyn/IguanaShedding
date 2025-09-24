@@ -58,11 +58,24 @@ def clean_project_data(project_data):
     }
 
 def create_project_in_aap(project_data):
+    # Strip AWX-specific or read-only fields
+    excluded = [
+        "id", "related", "summary_fields", "created", "modified",
+        "last_job", "last_job_run", "current_update", "scm_last_revision"
+    ]
+    for key in excluded:
+        project_data.pop(key, None)
+
+    # Ensure organization is not present in the body — it's in the URL
+    project_data.pop("organization", None)
+
     url = f"{args.aap_host}/api/controller/v2/organizations/{args.organization_id}/projects/"
     response = requests.post(url, headers=HEADERS_AAP, json=project_data, verify=False)
+
     if response.status_code >= 300:
-        sys.exit(f"Failed to create project in AAP: {response.status_code} {response.text}")
-    print(f"✅ Project created in AAP (ID: {response.json().get('id')})")
+        sys.exit(f"Failed to create project in AAP: {response.status_code}\n{response.text}")
+
+    print(f"Project created in AAP: {response.json().get('id')}")
 
 if __name__ == "__main__":
     print(f"📤 Fetching project {args.project_id} from AWX...")
