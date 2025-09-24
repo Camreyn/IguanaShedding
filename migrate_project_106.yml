@@ -23,4 +23,4 @@
         --awx-host {{ awx_host }} --awx-token {{ awx_token }}
         --aap-host {{ aap_host }} --aap-token {{ aap_token }}
         --project-id {{ project_id }}
-        --organization-id {{ aap_organization_id }}
+        --organization-id {{ organization_id }}
