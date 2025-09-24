@@ -3,10 +3,10 @@
   hosts: pilotserver
   gather_facts: no
   vars:
-    awx_host: {{survey_awx_host}}
-    awx_token: {{survey_awx_token}}
-    aap_host: {{survey_aap_host}}
-    aap_token: {{survey_aap_token}}
+    awx_host: "{{ survey_awx_host }}"
+    awx_token: "{{ survey_awx_token }}"
+    aap_host: "{{ survey_aap_host }}"
+    aap_token: "{{ survey_aap_token }}"
     project_id: 106
 
   tasks:
