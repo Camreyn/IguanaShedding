@@ -2,6 +2,10 @@
 import requests
 import argparse
 import sys
+import urllib3
+
+# Disable SSL warnings for self-signed certs
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--awx-host', required=True)
