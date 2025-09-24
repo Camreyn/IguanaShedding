@@ -8,6 +8,7 @@
     aap_host: "{{ survey_aap_host }}"
     aap_token: "{{ survey_aap_token }}"
     project_id: 106
+    organization_id: "{{ aap_organization_id }}"
 
   tasks:
     - name: Ensure script is in workspace
@@ -22,3 +23,4 @@
         --awx-host {{ awx_host }} --awx-token {{ awx_token }}
         --aap-host {{ aap_host }} --aap-token {{ aap_token }}
         --project-id {{ project_id }}
+        --organization-id {{ aap_organization_id }}
