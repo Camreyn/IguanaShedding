@@ -4,7 +4,6 @@ import argparse
 import sys
 import urllib3
 
-# Disable SSL warnings for self-signed certs
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 parser = argparse.ArgumentParser()
@@ -13,7 +12,7 @@ parser.add_argument('--awx-token', required=True)
 parser.add_argument('--aap-host', required=True)
 parser.add_argument('--aap-token', required=True)
 parser.add_argument('--project-id', required=True)
-parser.add_argument('--organization-id', default=1, type=int)
+parser.add_argument('--organization-id', required=True, type=int)
 args = parser.parse_args()
 
 HEADERS_AWX = {
@@ -41,14 +40,25 @@ def clean_project_data(project_data):
     for key in exclude_keys:
         project_data.pop(key, None)
 
-    # Required fallback defaults
-    project_data["organization"] = args.organization_id
-    project_data["scm_type"] = project_data.get("scm_type") or "git"
-    project_data["scm_url"] = project_data.get("scm_url") or "https://example.com/placeholder.git"
-    return project_data
+    # Required fields from AAP docs
+    return {
+        "name": project_data.get("name", "Unnamed Migrated Project"),
+        "description": project_data.get("description", ""),
+        "scm_type": project_data.get("scm_type") or "",
+        "scm_url": project_data.get("scm_url") or "",
+        "scm_branch": project_data.get("scm_branch") or "",
+        "scm_clean": project_data.get("scm_clean", False),
+        "scm_track_submodules": project_data.get("scm_track_submodules", False),
+        "scm_delete_on_update": project_data.get("scm_delete_on_update", False),
+        "scm_update_on_launch": project_data.get("scm_update_on_launch", False),
+        "scm_update_cache_timeout": project_data.get("scm_update_cache_timeout", 0),
+        "timeout": project_data.get("timeout", 0),
+        "allow_override": project_data.get("allow_override", False),
+        "organization": args.organization_id
+    }
 
 def create_project_in_aap(project_data):
-    url = f"{args.aap_host}/api/controller/v2/projects/"
+    url = f"{args.aap_host}/api/controller/v2/organizations/{args.organization_id}/projects/"
     response = requests.post(url, headers=HEADERS_AAP, json=project_data, verify=False)
     if response.status_code >= 300:
         sys.exit(f"Failed to create project in AAP: {response.status_code} {response.text}")
