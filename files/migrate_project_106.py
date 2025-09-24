@@ -26,7 +26,7 @@ HEADERS_AAP = {
 }
 
 def get_project_from_awx():
-    url = f"{args.awx_host}/api/controller/v2/projects/{args.project_id}/"
+    url = f"{args.awx_host}/api/v2/projects/{args.project_id}/"
     response = requests.get(url, headers=HEADERS_AWX, verify=False)
     if response.status_code != 200:
         sys.exit(f"Failed to fetch project {args.project_id}: {response.status_code} {response.text}")
