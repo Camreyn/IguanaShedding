@@ -1,0 +1,24 @@
+---
+- name: Migrate project 106 from AWX to AAP
+  hosts: pilotserver
+  gather_facts: no
+  vars:
+    awx_host: {{survey_awx_host}}
+    awx_token: {{survey_awx_token}}
+    aap_host: {{survey_aap_host}}
+    aap_token: {{survey_aap_token}}
+    project_id: 106
+
+  tasks:
+    - name: Ensure script is in workspace
+      ansible.builtin.copy:
+        src: "files/migrate_project_106.py"
+        dest: "./migrate_project_106.py"
+        mode: '0755'
+
+    - name: Run project migration script
+      ansible.builtin.command: >
+        python3 migrate_project_106.py
+        --awx-host {{ awx_host }} --awx-token {{ awx_token }}
+        --aap-host {{ aap_host }} --aap-token {{ aap_token }}
+        --project-id {{ project_id }}
