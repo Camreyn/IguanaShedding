@@ -16,7 +16,7 @@ Exit codes: 0 success (or dry-run), 2 partial failures, 1 fatal.
 import argparse
 import re
 import sys
-from typing import Dict, Any, Iterable, Optional
+from typing import Dict, Any, Iterable, Optional, Pattern
 import requests
 import urllib3
 
@@ -148,7 +148,7 @@ def create_aap_project(aap_host: str, aap_token: str, payload: Dict[str, Any], v
 
 
 # --------- helpers ---------
-def should_migrate(name: str, include_re: Optional[re.Pattern], exclude_re: Optional[re.Pattern]) -> bool:
+def should_migrate(name: str, include_re: Optional[Pattern[str]], exclude_re: Optional[Pattern[str]]) -> bool:
     if include_re and not include_re.search(name):
         return False
     if exclude_re and exclude_re.search(name):
@@ -181,8 +181,8 @@ def run_single(args) -> int:
 
 
 def run_bulk(args) -> int:
-    include_re = re.compile(args.include) if args.include else None
-    exclude_re = re.compile(args.exclude) if args.exclude else None
+    include_re: Optional[Pattern[str]] = re.compile(args.include) if args.include else None
+    exclude_re: Optional[Pattern[str]] = re.compile(args.exclude) if args.exclude else None
 
     aap_ping(args.aap_host, args.aap_token, args.verify_tls)
     assert_org_exists(args.aap_host, args.aap_token, args.organization_id, args.verify_tls)
