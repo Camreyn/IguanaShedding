@@ -1,0 +1,28 @@
+- name: Migrate all AWX projects to AAP
+  hosts: pilotserver
+  gather_facts: no
+  vars:
+    awx_host: "{{ survey_awx_host }}"
+    awx_token: "{{ survey_awx_token }}"
+    aap_host: "{{ survey_aap_host }}"
+    aap_token: "{{ survey_aap_token }}"
+    organization_id: "{{ survey_aap_organization_id }}"
+    include_regex: "{{ survey_include_regex | default('') }}"
+    exclude_regex: "{{ survey_exclude_regex | default('') }}"
+    dry_run: "{{ survey_dry_run | default(false) }}"
+    verify_tls: "{{ survey_verify_tls | default(false) }}"
+  tasks:
+    - copy:
+        src: files/migrate_projects.py
+        dest: ./migrate_projects.py
+        mode: '0755'
+    - command: >
+        python3 migrate_projects.py
+        --awx-host {{ awx_host }} --awx-token {{ awx_token }}
+        --aap-host {{ aap_host }} --aap-token {{ aap_token }}
+        --organization-id {{ organization_id }}
+        --all
+        {% if include_regex %}--include "{{ include_regex }}"{% endif %}
+        {% if exclude_regex %}--exclude "{{ exclude_regex }}"{% endif %}
+        {% if dry_run %}--dry-run{% endif %}
+        {% if verify_tls %}--verify-tls{% endif %}
