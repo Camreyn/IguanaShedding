@@ -1,0 +1,50 @@
+---
+- name: Migrate AWX Job Templates to AAP (single or bulk)
+  hosts: pilotserver
+  gather_facts: no
+  vars:
+    awx_host: "{{ survey_awx_host }}"
+    awx_token: "{{ survey_awx_token }}"
+    aap_host: "{{ survey_aap_host }}"
+    aap_token: "{{ survey_aap_token }}"
+    organization_id: "{{ survey_aap_organization_id }}"
+    # Set this to the AWX API ID to migrate just one JT; leave blank to run bulk.
+    template_id: "{{ survey_template_id | default('') }}"
+    include_regex: "{{ survey_include_regex | default('') }}"
+    exclude_regex: "{{ survey_exclude_regex | default('') }}"
+    verify_tls: "{{ survey_verify_tls | default(false) }}"
+    dry_run: "{{ survey_dry_run | default(false) }}"
+
+  tasks:
+    - name: Ensure migrator is present
+      ansible.builtin.copy:
+        src: files/migrate_job_templates.py
+        dest: ./migrate_job_templates.py
+        mode: '0755'
+
+    - name: Run JT migration (single if template_id set, otherwise bulk)
+      ansible.builtin.command:
+        argv: >-
+          {{
+            [
+              'python3', './migrate_job_templates.py',
+              '--awx-host', awx_host,
+              '--awx-token', awx_token,
+              '--aap-host', aap_host,
+              '--aap-token', aap_token,
+              '--organization-id', organization_id
+            ]
+            +
+            ( template_id | string | length > 0
+              | ternary( ['--template-id', (template_id | string)], ['--all'] )
+            )
+            +
+            ( (include_regex | length > 0) | ternary(['--include', include_regex], []) )
+            +
+            ( (exclude_regex | length > 0) | ternary(['--exclude', exclude_regex], []) )
+            +
+            ( dry_run | bool | ternary(['--dry-run'], []) )
+            +
+            ( verify_tls | bool | ternary(['--verify-tls'], []) )
+          }}
+      no_log: true
