@@ -47,4 +47,4 @@
             +
             ( verify_tls | bool | ternary(['--verify-tls'], []) )
           }}
-      no_log: true
+      no_log: false
