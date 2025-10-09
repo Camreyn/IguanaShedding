@@ -2,23 +2,20 @@
 """
 Migrate AWX Job Templates to AAP (Controller).
 
-Key behavior:
+Key behavior in this version:
 - Single or bulk migration:
     • Single: --template-id <ID>  (or env TEMPLATE_ID)
-    • Bulk:   --all  (optional --include/--exclude filters)
-- Force Execution Environment in AAP by NAME (default: "Control Plane Execution Environment"),
-  ignoring whatever EE the JT used in AWX.
-- Credential matching is resilient: maps credential TYPE by NAME, not by numeric id.
+    • Bulk:   --all  (optional --include/--exclude)
+- Force Execution Environment by AAP API **ID** via --force-ee-id (or env FORCE_EE_ID).
+  This overrides whatever EE the JT used in AWX.
+- Robust credential matching: resolves credential TYPE by NAME (IDs differ across installs).
 
-Usage examples:
-  # Single JT by id, forcing the default EE
-  python3 migrate_job_templates.py ... --template-id 123
-
-  # Single via env var
-  TEMPLATE_ID=123 python3 migrate_job_templates.py ...
+Examples:
+  # Single JT by id, forcing EE id 5
+  python3 migrate_job_templates.py ... --template-id 123 --force-ee-id 5
 
   # Bulk with include filter
-  python3 migrate_job_templates.py ... --all --include "^(Prod|Infra)-"
+  python3 migrate_job_templates.py ... --all --include "^(Prod|Infra)-" --force-ee-id 5
 """
 
 import argparse
@@ -29,8 +26,8 @@ from typing import Any, Dict, Iterable, Optional, Tuple, Pattern, List
 
 import requests
 import urllib3
-
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 TIMEOUT = 30
 
 
@@ -53,12 +50,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--dry-run', action='store_true')
     p.add_argument('--verify-tls', action='store_true')
 
-    # New: force EE name on AAP
+    # NEW: force EE by AAP API id (takes precedence over any name-based logic)
+    env_force_ee_id = os.getenv('FORCE_EE_ID')
     p.add_argument(
-        '--force-ee-name',
-        default=os.getenv('FORCE_EE_NAME', 'Control Plane Execution Environment'),
-        help='Execution Environment NAME to set on the migrated JT in AAP (default: "Control Plane Execution Environment")'
+        '--force-ee-id',
+        type=int,
+        default=(int(env_force_ee_id) if env_force_ee_id and env_force_ee_id.isdigit() else None),
+        help='AAP Execution Environment API ID to set on migrated JTs (e.g., 5).'
     )
+
     return p.parse_args()
 
 
@@ -125,6 +125,19 @@ def q_one(aap: str, tok: str, endpoint: str, name: str, org: int, v: bool) -> Op
     return None
 
 
+def assert_ee_exists_by_id(aap: str, tok: str, ee_id: int, org_id: int, v: bool) -> None:
+    """
+    Verify the EE exists. Accept either global (organization is null/absent) or matches org_id.
+    """
+    d = GET(f"{aap}/api/controller/v2/execution_environments/{ee_id}/", H(tok), v)
+    ee_org = d.get('organization')
+    if ee_org not in (None, org_id):
+        raise RuntimeError(
+            f"Execution Environment id {ee_id} belongs to organization {ee_org}, "
+            f"which does not match target org {org_id}."
+        )
+
+
 def ensure_refs(
     aap: str,
     tok: str,
@@ -132,13 +145,8 @@ def ensure_refs(
     v: bool,
     proj_name: Optional[str],
     inv_name: Optional[str],
-    ee_name: Optional[str],
-    force_ee_name: Optional[str] = None
+    forced_ee_id: Optional[int]
 ) -> Tuple[Optional[int], Optional[int], Optional[int]]:
-    """
-    Resolve project/inventory by their names.
-    Resolve EE by 'force_ee_name' if provided; otherwise by ee_name.
-    """
     proj_id = inv_id = ee_id = None
     if proj_name:
         p = q_one(aap, tok, "projects", proj_name, org, v)
@@ -151,12 +159,11 @@ def ensure_refs(
             raise RuntimeError(f"Inventory '{inv_name}' not found in AAP org {org}")
         inv_id = i['id']
 
-    desired_ee_name = force_ee_name or ee_name
-    if desired_ee_name:
-        e = q_one(aap, tok, "execution_environments", desired_ee_name, org, v)
-        if not e:
-            raise RuntimeError(f"Execution Environment '{desired_ee_name}' not found in AAP org {org}")
-        ee_id = e['id']
+    if forced_ee_id is None:
+        raise RuntimeError("You must supply --force-ee-id to set the Execution Environment by API id.")
+    assert_ee_exists_by_id(aap, tok, forced_ee_id, org, v)
+    ee_id = forced_ee_id
+
     return proj_id, inv_id, ee_id
 
 
@@ -282,13 +289,10 @@ def migrate_one(args: argparse.Namespace, obj: Dict[str, Any]) -> None:
     sf = obj.get('summary_fields') or {}
     proj_name = (sf.get('project') or {}).get('name')
     inv_name = (sf.get('inventory') or {}).get('name')
-    # AWX EE name is intentionally ignored; we will force args.force_ee_name.
-    ee_name_ignored = (sf.get('execution_environment') or {}).get('name')  # not used
 
     proj_id, inv_id, ee_id = ensure_refs(
         args.aap_host, args.aap_token, args.organization_id, args.verify_tls,
-        proj_name, inv_name, None,  # do NOT use AWX EE name
-        force_ee_name=args.force_ee_name
+        proj_name, inv_name, args.force_ee_id
     )
 
     existing = find_aap_jt(args.aap_host, args.aap_token, name, args.organization_id, args.verify_tls)
@@ -298,12 +302,12 @@ def migrate_one(args: argparse.Namespace, obj: Dict[str, Any]) -> None:
 
     payload = jt_payload_from_awx(obj, args.organization_id, proj_id, inv_id, ee_id)
     if args.dry_run:
-        print(f"DRY-RUN (create JT): {name}  [EE forced to '{args.force_ee_name}']")
+        print(f"DRY-RUN (create JT): {name}  [EE id {args.force_ee_id}]")
         return
 
     created = create_jt(args.aap_host, args.aap_token, payload, args.verify_tls)
     jt_id = created.get('id')
-    print(f"CREATED JT: {name} -> AAP id {jt_id}  [EE='{args.force_ee_name}']")
+    print(f"CREATED JT: {name} -> AAP id {jt_id}  [EE id {args.force_ee_id}]")
 
     creds = list(awx_jt_creds(args.awx_host, args.awx_token, obj['id'], args.verify_tls))
     if creds:
