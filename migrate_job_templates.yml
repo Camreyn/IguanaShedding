@@ -22,32 +22,33 @@
         dest: ./migrate_job_templates.py
         mode: '0755'
 
-    - name: Run JT migration (single if template_id set, otherwise bulk)
-      ansible.builtin.command:
-        argv: >-
-          {{
-            [
-              'python3','./migrate_job_templates.py',
-              '--awx-host', awx_host,
-              '--awx-token', awx_token,
-              '--aap-host', aap_host,
-              '--aap-token', aap_token,
-              '--organization-id', organization_id
-            ]
-            + ( ((template_id | default('') | string | length) > 0)
-                | ternary(['--template-id', (template_id | string)], ['--all'])
-              )
-            + ( ((include_regex | default('') | string | length) > 0)
-                | ternary(['--include', include_regex], [])
-              )
-            + ( ((exclude_regex | default('') | string | length) > 0)
-                | ternary(['--exclude', exclude_regex], [])
-              )
-            + ( (dry_run | default(false) | bool)
-                | ternary(['--dry-run'], [])
-              )
-            + ( (verify_tls | default(false) | bool)
-                | ternary(['--verify-tls'], [])
-              )
-          }}
-      no_log: false
+- name: Run JT migration (single if template_id set, otherwise bulk)
+  ansible.builtin.command:
+    argv: >-
+      {{
+        [
+          'python3','./migrate_job_templates.py',
+          '--awx-host', awx_host,
+          '--awx-token', awx_token,
+          '--aap-host', aap_host,
+          '--aap-token', aap_token,
+          '--organization-id', organization_id,
+          '--force-ee-name', (force_ee_name | default('Control Plane Execution Environment'))
+        ]
+        + ( ((template_id | default('') | string | length) > 0)
+            | ternary(['--template-id', (template_id | string)], ['--all'])
+          )
+        + ( ((include_regex | default('') | string | length) > 0)
+            | ternary(['--include', include_regex], [])
+          )
+        + ( ((exclude_regex | default('') | string | length) > 0)
+            | ternary(['--exclude', exclude_regex], [])
+          )
+        + ( (dry_run | default(false) | bool)
+            | ternary(['--dry-run'], [])
+          )
+        + ( (verify_tls | default(false) | bool)
+            | ternary(['--verify-tls'], [])
+          )
+      }}
+  no_log: false
