@@ -22,7 +22,7 @@
         dest: ./migrate_job_templates.py
         mode: '0755'
 
-    - name: Run JT migration (single if template_id set, otherwise bulk; force EE by id)
+    - name: Run JT migration (single/bulk; force EE id and Machine cred id)
       ansible.builtin.command:
         argv: >-
           {{
@@ -33,7 +33,8 @@
               '--aap-host', aap_host,
               '--aap-token', aap_token,
               '--organization-id', organization_id,
-              '--force-ee-id', (force_ee_id | default(5) | int)
+              '--force-ee-id', (force_ee_id | default(5) | int),
+              '--force-machine-cred-id', (force_machine_cred_id | default(31) | int)
             ]
             + ( ((template_id | default('') | string | length) > 0)
                 | ternary(['--template-id', (template_id | string)], ['--all'])
@@ -51,4 +52,4 @@
                 | ternary(['--verify-tls'], [])
               )
           }}
-      no_log: false
+          no_log: false

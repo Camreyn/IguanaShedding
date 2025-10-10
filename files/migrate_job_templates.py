@@ -8,14 +8,14 @@ Key behavior in this version:
     • Bulk:   --all  (optional --include/--exclude)
 - Force Execution Environment by AAP API **ID** via --force-ee-id (or env FORCE_EE_ID).
   This overrides whatever EE the JT used in AWX.
-- Robust credential matching: resolves credential TYPE by NAME (IDs differ across installs).
+- Robust credential matching: resolves credential TYPE by NAME (portable across installs).
+- NEW: Optionally **override Machine credentials** by attaching a specific **AAP credential id**
+  via --force-machine-cred-id (or env FORCE_MACHINE_CRED_ID). If set, every AWX “Machine”
+  credential on a JT is replaced with this AAP credential id.
 
 Examples:
-  # Single JT by id, forcing EE id 5
-  python3 migrate_job_templates.py ... --template-id 123 --force-ee-id 5
-
-  # Bulk with include filter
-  python3 migrate_job_templates.py ... --all --include "^(Prod|Infra)-" --force-ee-id 5
+  # Single JT by id, forcing EE id 5 and replacing Machine creds with AAP cred id 31
+  python3 migrate_job_templates.py ... --template-id 123 --force-ee-id 5 --force-machine-cred-id 31
 """
 
 import argparse
@@ -50,13 +50,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--dry-run', action='store_true')
     p.add_argument('--verify-tls', action='store_true')
 
-    # NEW: force EE by AAP API id (takes precedence over any name-based logic)
+    # Force EE by ID
     env_force_ee_id = os.getenv('FORCE_EE_ID')
     p.add_argument(
         '--force-ee-id',
         type=int,
         default=(int(env_force_ee_id) if env_force_ee_id and env_force_ee_id.isdigit() else None),
         help='AAP Execution Environment API ID to set on migrated JTs (e.g., 5).'
+    )
+
+    # NEW: Force Machine credential by ID
+    env_force_mc_id = os.getenv('FORCE_MACHINE_CRED_ID')
+    p.add_argument(
+        '--force-machine-cred-id',
+        type=int,
+        default=(int(env_force_mc_id) if env_force_mc_id and env_force_mc_id.isdigit() else None),
+        help='AAP Credential API ID to attach for any AWX “Machine” credentials (e.g., 31).'
     )
 
     return p.parse_args()
@@ -126,14 +135,21 @@ def q_one(aap: str, tok: str, endpoint: str, name: str, org: int, v: bool) -> Op
 
 
 def assert_ee_exists_by_id(aap: str, tok: str, ee_id: int, org_id: int, v: bool) -> None:
-    """
-    Verify the EE exists. Accept either global (organization is null/absent) or matches org_id.
-    """
     d = GET(f"{aap}/api/controller/v2/execution_environments/{ee_id}/", H(tok), v)
     ee_org = d.get('organization')
     if ee_org not in (None, org_id):
         raise RuntimeError(
             f"Execution Environment id {ee_id} belongs to organization {ee_org}, "
+            f"which does not match target org {org_id}."
+        )
+
+
+def assert_credential_exists_by_id(aap: str, tok: str, cred_id: int, org_id: int, v: bool) -> None:
+    d = GET(f"{aap}/api/controller/v2/credentials/{cred_id}/", H(tok), v)
+    c_org = d.get('organization')
+    if c_org not in (None, org_id):
+        raise RuntimeError(
+            f"Credential id {cred_id} belongs to organization {c_org}, "
             f"which does not match target org {org_id}."
         )
 
@@ -265,11 +281,29 @@ def attach_cred_to_jt(aap: str, tok: str, jt_id: int, cred_id: int, v: bool) -> 
 
 
 def resolve_cred_ids(aap: str, tok: str, org: int, v: bool,
-                     awx_jt_creds_list: Iterable[Dict[str, Any]]) -> List[int]:
+                     awx_jt_creds_list: Iterable[Dict[str, Any]],
+                     force_machine_cred_id: Optional[int]) -> List[int]:
+    """
+    Map attached AWX credentials to AAP credential ids.
+    - If force_machine_cred_id is set, any AWX credential whose type is "Machine"
+      will be replaced by that id (after validation).
+    - Other credential types are resolved by name (+ type name to disambiguate).
+    - De-duplicates ids to avoid double attachments.
+    """
     ids: List[int] = []
     for c in awx_jt_creds_list:
         nm = c.get('name')
-        awx_type_name = (c.get('summary_fields') or {}).get('credential_type', {}).get('name')
+        sf = c.get('summary_fields') or {}
+        awx_type_name = (sf.get('credential_type') or {}).get('name')
+
+        if force_machine_cred_id is not None and (awx_type_name or '').lower() == 'machine':
+            # override with explicit AAP id
+            assert_credential_exists_by_id(aap, tok, force_machine_cred_id, org, v)
+            if force_machine_cred_id not in ids:
+                ids.append(force_machine_cred_id)
+            continue
+
+        # Non-machine or no override: resolve by name (+ type name if needed)
         if not nm:
             continue
         found = aap_find_credential(aap, tok, nm, awx_type_name, org, v)
@@ -277,9 +311,12 @@ def resolve_cred_ids(aap: str, tok: str, org: int, v: bool,
             raise RuntimeError(
                 f"Credential '{nm}'"
                 f"{' (type '+awx_type_name+')' if awx_type_name else ''} not found in AAP. "
-                f"Migrate credentials first."
+                f"Migrate credentials first or supply --force-machine-cred-id for Machine creds."
             )
-        ids.append(found['id'])
+        cid = found['id']
+        if cid not in ids:
+            ids.append(cid)
+
     return ids
 
 
@@ -311,7 +348,10 @@ def migrate_one(args: argparse.Namespace, obj: Dict[str, Any]) -> None:
 
     creds = list(awx_jt_creds(args.awx_host, args.awx_token, obj['id'], args.verify_tls))
     if creds:
-        ids = resolve_cred_ids(args.aap_host, args.aap_token, args.organization_id, args.verify_tls, creds)
+        ids = resolve_cred_ids(
+            args.aap_host, args.aap_token, args.organization_id, args.verify_tls,
+            creds, args.force_machine_cred_id
+        )
         for cid in ids:
             attach_cred_to_jt(args.aap_host, args.aap_token, jt_id, cid, args.verify_tls)
         print(f"  Attached {len(ids)} credential(s)")
