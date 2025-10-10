@@ -27,7 +27,7 @@
         argv: >-
           {{
             [
-              'python3','./migrate_job_templates.py',
+              'python','migrate_job_templates.py',
               '--awx-host', awx_host,
               '--awx-token', awx_token,
               '--aap-host', aap_host,
