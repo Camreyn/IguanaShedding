@@ -33,7 +33,7 @@
               '--aap-host', aap_host,
               '--aap-token', aap_token,
               '--organization-id', organization_id,
-              '--force-ee-id', (force_ee_id | default(5) | int)  # <-- EE API id here
+              '--force-ee-id', (force_ee_id | default(5) | int)
             ]
             + ( ((template_id | default('') | string | length) > 0)
                 | ternary(['--template-id', (template_id | string)], ['--all'])
