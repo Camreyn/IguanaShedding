@@ -22,46 +22,49 @@
         dest: ./migrate_job_templates.py
         mode: '0755'
 
+    - name: Build argv for JT migrator (YAML-compliant)
+      ansible.builtin.set_fact:
+        jt_args: >-
+          {{
+            [
+              'python3', './migrate_job_templates.py',
+              '--awx-host', awx_host,
+              '--awx-token', awx_token,
+              '--aap-host', aap_host,
+              '--aap-token', aap_token,
+              '--organization-id', (organization_id | string),
+              '--force-ee-id', ((force_ee_id | default(5) | int) | string),
+              '--force-machine-cred-id', ((force_machine_cred_id | default(31) | int) | string)
+            ]
+            +
+            (
+              ['--template-id', (template_id | string)]
+              if (template_id | default('') | string | length) > 0 else
+              ['--all']
+            )
+            +
+            (
+              ['--include', include_regex]
+              if (include_regex | default('') | string | length) > 0 else
+              []
+            )
+            +
+            (
+              ['--exclude', exclude_regex]
+              if (exclude_regex | default('') | string | length) > 0 else
+              []
+            )
+            +
+            (
+              ['--dry-run'] if (dry_run | default(false) | bool) else []
+            )
+            +
+            (
+              ['--verify-tls'] if (verify_tls | default(false) | bool) else []
+            )
+          }}
+
     - name: Run JT migration (single/bulk; force EE id and Machine cred id)
       ansible.builtin.command:
-        argv:
-          - python3
-          - ./migrate_job_templates.py
-          - --awx-host
-          - "{{ awx_host }}"
-          - --awx-token
-          - "{{ awx_token }}"
-          - --aap-host
-          - "{{ aap_host }}"
-          - --aap-token
-          - "{{ aap_token }}"
-          - --organization-id
-          - "{{ organization_id }}"
-          - --force-ee-id
-          - "{{ force_ee_id | default(5) | int }}"
-          - --force-machine-cred-id
-          - "{{ force_machine_cred_id | default(31) | int }}"
-          # single vs bulk
-          {% set has_tid = ((template_id | default('') | string | length) > 0) %}
-          {% for item in ( has_tid | ternary(['--template-id', (template_id | string)], ['--all']) ) %}
-          - "{{ item }}"
-          {% endfor %}
-          # include
-          {% set has_inc = ((include_regex | default('') | string | length) > 0) %}
-          {% for item in ( has_inc | ternary(['--include', include_regex], []) ) %}
-          - "{{ item }}"
-          {% endfor %}
-          # exclude
-          {% set has_exc = ((exclude_regex | default('') | string | length) > 0) %}
-          {% for item in ( has_exc | ternary(['--exclude', exclude_regex], []) ) %}
-          - "{{ item }}"
-          {% endfor %}
-          # dry-run
-          {% for item in ( (dry_run | default(false) | bool) | ternary(['--dry-run'], []) ) %}
-          - "{{ item }}"
-          {% endfor %}
-          # verify-tls
-          {% for item in ( (verify_tls | default(false) | bool) | ternary(['--verify-tls'], []) ) %}
-          - "{{ item }}"
-          {% endfor %}
-          no_log: false
+        argv: "{{ jt_args }}"
+      no_log: false
