@@ -22,7 +22,7 @@
         dest: ./migrate_job_templates.py
         mode: '0755'
 
-    - name: Run JT migration (single if template_id set, otherwise bulk)
+    - name: Run JT migration (single if template_id set, otherwise bulk; force EE by id)
       ansible.builtin.command:
         argv: >-
           {{
@@ -51,4 +51,4 @@
                 | ternary(['--verify-tls'], [])
               )
           }}
-      no_log: false
+      no_log: true
