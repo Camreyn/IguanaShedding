@@ -80,15 +80,25 @@ def GET(url: str, h: Dict[str, str], v: bool) -> Dict[str, Any]:
 
 def POST(url: str, h: Dict[str, str], payload: Dict[str, Any], v: bool) -> Dict[str, Any]:
     r = requests.post(url, headers=h, json=payload, verify=v, timeout=TIMEOUT)
-    if r.status_code not in (200, 201, 202):
-        raise RuntimeError(f"POST {url} -> {r.status_code}:\n{r.text}")
-    return r.json()
+    if r.status_code in (200, 201, 202):
+        try:
+            return r.json()
+        except ValueError:
+            return {}
+    if r.status_code == 204:  # AAP often returns 204 for association endpoints
+        return {}
+    raise RuntimeError(f"POST {url} -> {r.status_code}:\n{r.text}")
 
 def PATCH(url: str, h: Dict[str, str], payload: Dict[str, Any], v: bool) -> Dict[str, Any]:
     r = requests.patch(url, headers=h, json=payload, verify=v, timeout=TIMEOUT)
-    if r.status_code not in (200, 201, 202):
-        raise RuntimeError(f"PATCH {url} -> {r.status_code}:\n{r.text}")
-    return r.json()
+    if r.status_code in (200, 201, 202):
+        try:
+            return r.json()
+        except ValueError:
+            return {}
+    if r.status_code == 204:  # Some PATCH operations can also return 204
+        return {}
+    raise RuntimeError(f"PATCH {url} -> {r.status_code}:\n{r.text}")
 
 def ping(aap: str, tok: str, v: bool) -> None:
     u = f"{aap}/api/controller/v2/ping/"
