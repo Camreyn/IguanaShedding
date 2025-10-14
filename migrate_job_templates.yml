@@ -22,12 +22,12 @@
         dest: ./migrate_job_templates.py
         mode: '0755'
 
-    - name: Build argv for JT migrator (YAML-compliant)
+    - name: Build argv for JT migrator
       ansible.builtin.set_fact:
         jt_args: >-
           {{
             [
-              'python3', './migrate_job_templates.py',
+              'python3','./migrate_job_templates.py',
               '--awx-host', awx_host,
               '--awx-token', awx_token,
               '--aap-host', aap_host,
@@ -36,35 +36,15 @@
               '--force-ee-id', ((force_ee_id | default(5) | int) | string),
               '--force-machine-cred-id', ((force_machine_cred_id | default(31) | int) | string)
             ]
-            +
-            (
-              ['--template-id', (template_id | string)]
-              if (template_id | default('') | string | length) > 0 else
-              ['--all']
-            )
-            +
-            (
-              ['--include', include_regex]
-              if (include_regex | default('') | string | length) > 0 else
-              []
-            )
-            +
-            (
-              ['--exclude', exclude_regex]
-              if (exclude_regex | default('') | string | length) > 0 else
-              []
-            )
-            +
-            (
-              ['--dry-run'] if (dry_run | default(false) | bool) else []
-            )
-            +
-            (
-              ['--verify-tls'] if (verify_tls | default(false) | bool) else []
-            )
+            + ( ['--template-id', (template_id | string)] if (template_id | default('') | string | length) > 0 else ['--all'] )
+            + ( ['--with-notifications'] if with_notifications | default(false) | bool else [] )
+            + ( ['--notif-secrets-file', notif_secrets_file] if (notif_secrets_file | default('') | string | length) > 0 else [] )
+            + ( ['--with-schedules'] if with_schedules | default(false) | bool else [] )
+            + ( ['--dry-run'] if (dry_run | default(false) | bool) else [] )
+            + ( ['--verify-tls'] if (verify_tls | default(false) | bool) else [] )
           }}
 
-    - name: Run JT migration (single/bulk; force EE id and Machine cred id)
+    - name: Run JT migration
       ansible.builtin.command:
         argv: "{{ jt_args }}"
-      no_log: false
+      no_log: true
