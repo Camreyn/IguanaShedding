@@ -462,13 +462,39 @@ def migrate_one(args: argparse.Namespace, obj: Dict[str, Any],
     proj_name = (sf.get('project') or {}).get('name')
     inv_name  = (sf.get('inventory') or {}).get('name')
 
+    # Resolve refs (EE forced via --force-ee-id)
     proj_id, inv_id, ee_id = ensure_refs(
         args.aap_host, args.aap_token, args.organization_id, args.verify_tls,
         proj_name, inv_name, args.force_ee_id
     )
 
-    # survey (fetch from AWX)
+    # Always fetch AWX survey spec (even if not enabled there)
     survey_spec = awx_jt_survey_spec(args.awx_host, args.awx_token, obj['id'], args.verify_tls)
+
+    # Find or create JT on AAP
+    existing = find_aap_jt(args.aap_host, args.aap_token, name, args.organization_id, args.verify_tls)
+    jt_id: Optional[int] = None
+
+    if existing:
+        jt_id = existing.get('id')
+        print(f"FOUND existing JT: {name} -> AAP id {jt_id}  [will update attachments/survey/schedules]")
+        # If you prefer to skip updates on existing JTs, uncomment next line:
+        # print(f"SKIP (exists): {name} -> AAP id {jt_id}"); return
+    else:
+        payload = jt_payload_from_awx(obj, args.organization_id, proj_id, inv_id, ee_id)
+        if args.dry_run:
+            print(f"DRY-RUN (create JT): {name}  [EE id {args.force_ee_id}]")
+            # In dry-run we don’t have a real jt_id; don’t proceed with actions that need jt_id.
+            return
+        created = create_jt(args.aap_host, args.aap_token, payload, args.verify_tls)
+        jt_id = created.get('id')
+        print(f"CREATED JT: {name} -> AAP id {jt_id}  [EE id {args.force_ee_id}]")
+
+    # Guard: from here down, jt_id must exist
+    if jt_id is None:
+        raise RuntimeError(f"Internal error: jt_id not set for template '{name}'")
+
+    # Survey: POST spec then enable
     if survey_spec:
         if args.dry_run:
             print("  DRY-RUN: would POST survey_spec and enable survey")
@@ -476,57 +502,64 @@ def migrate_one(args: argparse.Namespace, obj: Dict[str, Any],
             post_survey_spec_to_aap(args.aap_host, args.aap_token, jt_id, survey_spec, args.verify_tls)
             # verify
             try:
-                check = GET(f"{args.aap_host}/api/controller/v2/job_templates/{jt_id}/survey_spec/", H(args.aap_token), args.verify_tls)
+                check = GET(f"{args.aap_host}/api/controller/v2/job_templates/{jt_id}/survey_spec/",
+                            H(args.aap_token), args.verify_tls)
                 if isinstance(check, dict) and check.get("spec"):
                     print(f"  Survey copied & enabled ({len(check['spec'])} question(s))")
                 else:
-                    print("  WARN: survey POSTed but could not verify questions via GET")
+                    print("  WARN: survey POSTed but verification showed empty spec")
             except Exception as _e:
-                print(f"  WARN: survey POSTed but GET verification failed: {_e}")
+                print(f"  WARN: survey verification failed: {_e}")
 
-    existing = find_aap_jt(args.aap_host, args.aap_token, name, args.organization_id, args.verify_tls)
-    if existing:
-        print(f"SKIP (exists): {name} -> AAP id {existing.get('id')}")
-        return
-
-    payload = jt_payload_from_awx(obj, args.organization_id, proj_id, inv_id, ee_id, survey_spec)
-    if args.dry_run:
-        print(f"DRY-RUN (create JT): {name}  [EE id {args.force_ee_id}]")
-        return
-
-    created = create_jt(args.aap_host, args.aap_token, payload, args.verify_tls)
-    jt_id = created.get('id')
-    print(f"CREATED JT: {name} -> AAP id {jt_id}  [EE id {args.force_ee_id}]")
-
-    # ensure survey enabled if we supplied spec
-    if survey_spec:
-        patch_enable_survey(args.aap_host, args.aap_token, jt_id, args.verify_tls)
-        print("  Enabled survey")
-
-    # credentials
+    # Credentials
     creds = list(awx_jt_creds(args.awx_host, args.awx_token, obj['id'], args.verify_tls))
     if creds:
-        ids = resolve_cred_ids(args.aap_host, args.aap_token, args.organization_id, args.verify_tls,
-                               creds, args.force_machine_cred_id)
-        for cid in ids:
-            attach_cred_to_jt(args.aap_host, args.aap_token, jt_id, cid, args.verify_tls)
-        print(f"  Attached {len(ids)} credential(s)")
+        if args.dry_run:
+            print("  DRY-RUN: would attach credentials")
+        else:
+            ids = resolve_cred_ids(args.aap_host, args.aap_token, args.organization_id, args.verify_tls,
+                                   creds, args.force_machine_cred_id)
+            for cid in ids:
+                attach_cred_to_jt(args.aap_host, args.aap_token, jt_id, cid, args.verify_tls)
+            print(f"  Attached {len(ids)} credential(s)")
 
-    # notifications (email)
+    # Notifications (email)
     if args.with_notifications:
-        notif_map = awx_jt_notifications(args.awx_host, args.awx_token, obj['id'], args.verify_tls)
-        if any(notif_map.values()):
-            attach_notifs_email(args.aap_host, args.aap_token, jt_id, args.organization_id, args.verify_tls,
-                                notif_map, notif_secrets_map, args.dry_run)
-            print("  Processed notifications (email)")
+        notifs = awx_jt_notifications(args.awx_host, args.awx_token, obj['id'], args.verify_tls)
+        if any(notifs.values()):
+            if args.dry_run:
+                print("  DRY-RUN: would create/attach email notifications")
+            else:
+                attach_notifs_email(args.aap_host, args.aap_token, jt_id, args.organization_id, args.verify_tls,
+                                    notifs, notif_secrets_map, args.dry_run)
+                print("  Processed notifications (email)")
 
-    # schedules
+    # Schedules
     if args.with_schedules:
         schedules = awx_jt_schedules(args.awx_host, args.awx_token, obj['id'], args.verify_tls)
+        created_cnt = 0
         for s in schedules:
-            sp = schedule_payload_from_awx(s, jt_id)
-            POST(f"{args.aap_host}/api/controller/v2/schedules/", H(args.aap_token), sp, args.verify_tls)
-            print(f"  Created schedule '{sp.get('name','')}'")
+            sp = schedule_payload_minimal(s, jt_id)
+            if not sp.get("rrule"):
+                print(f"  WARN: schedule '{s.get('name','')}' missing rrule; skipped")
+                continue
+            if args.dry_run:
+                print(f"  DRY-RUN: would create schedule '{sp.get('name','')}'")
+                created_cnt += 1
+                continue
+            try:
+                POST(f"{args.aap_host}/api/controller/v2/schedules/", H(args.aap_token), sp, args.verify_tls)
+                created_cnt += 1
+            except Exception as e:
+                print(f"  WARN: failed to create schedule '{sp.get('name','')}': {e}")
+        # verify
+        try:
+            aap_scheds = GET(f"{args.aap_host}/api/controller/v2/job_templates/{jt_id}/schedules/?page_size=200",
+                             H(args.aap_token), args.verify_tls)
+            total = len(aap_scheds.get("results", []))
+            print(f"  Schedules created: {created_cnt}; AAP currently shows {total}")
+        except Exception as _e:
+            print(f"  WARN: schedule verification fetch failed: {_e}")
 
 # ---------------- main ----------------
 def main() -> int:
