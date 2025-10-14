@@ -47,4 +47,4 @@
     - name: Run JT migration
       ansible.builtin.command:
         argv: "{{ jt_args }}"
-      no_log: true
+      no_log: false
