@@ -29,6 +29,14 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TIMEOUT = 30
 
+SAFE_SCHEDULE_KEYS = {
+    "name", "rrule", "enabled", "unified_job_template", "timezone",
+    # Optional job overrides that Controller accepts on schedules:
+    "extra_data", "inventory", "scm_branch", "limit",
+    "job_tags", "skip_tags", "verbosity", "forks", "timeout",
+    "execution_environment"
+}
+
 # ---------------- CLI ----------------
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Migrate AWX Job Templates to AAP")
@@ -126,11 +134,17 @@ def awx_jt_creds(a: str, t: str, jtid: int, v: bool) -> Iterable[Dict[str, Any]]
         yield o
 
 def awx_jt_survey_spec(a: str, t: str, jtid: int, v: bool) -> Optional[Dict[str, Any]]:
-    # AWX/Tower exposes survey at a dedicated endpoint
+    """
+    Always attempt to read the survey spec from AWX regardless of enablement.
+    Returns a dict with shape {"name": ..., "description": ..., "spec": [...]}
+    or None if no survey exists.
+    """
     u = f"{a}/api/v2/job_templates/{jtid}/survey_spec/"
     try:
         d = GET(u, H(t), v)
-        return d if isinstance(d, dict) and d else None
+        if isinstance(d, dict) and d.get("spec"):
+            return d
+        return None
     except Exception:
         return None
 
@@ -146,8 +160,32 @@ def awx_jt_notifications(a: str, t: str, jtid: int, v: bool) -> Dict[str, List[D
     }
 
 def awx_jt_schedules(a: str, t: str, jtid: int, v: bool) -> List[Dict[str, Any]]:
-    d = GET(f"{a}/api/v2/job_templates/{jtid}/schedules/?page_size=200", H(t), v)
-    return list(d.get('results', []))
+    return list(GET(f"{a}/api/v2/job_templates/{jtid}/schedules/?page_size=200", H(t), v).get("results", []))
+
+def schedule_payload_minimal(s: Dict[str, Any], jt_id: int) -> Dict[str, Any]:
+    """
+    Build a minimal, Controller-safe schedule payload. We do not pass unknown/readonly fields.
+    """
+    p: Dict[str, Any] = {
+        "name": s.get("name", ""),
+        "rrule": s.get("rrule", ""),
+        "enabled": bool(s.get("enabled", True)),
+        "unified_job_template": jt_id,
+    }
+    # Optional fields if present and non-empty
+    if s.get("timezone"):             p["timezone"] = s["timezone"]
+    if s.get("extra_data"):           p["extra_data"] = s["extra_data"]
+    if s.get("inventory"):            p["inventory"] = s["inventory"]
+    if s.get("scm_branch"):           p["scm_branch"] = s["scm_branch"]
+    if s.get("limit"):                p["limit"] = s["limit"]
+    if s.get("job_tags"):             p["job_tags"] = s["job_tags"]
+    if s.get("skip_tags"):            p["skip_tags"] = s["skip_tags"]
+    if s.get("verbosity") is not None: p["verbosity"] = int(s.get("verbosity") or 0)
+    if s.get("forks") is not None:     p["forks"] = int(s.get("forks") or 0)
+    if s.get("timeout") is not None:   p["timeout"] = int(s.get("timeout") or 0)
+    if s.get("execution_environment"): p["execution_environment"] = s["execution_environment"]
+    # Filter to safe keys only (defense-in-depth)
+    return {k: v for k, v in p.items() if k in SAFE_SCHEDULE_KEYS}
 
 # ---------------- AAP lookups & asserts ----------------
 def q_one(aap: str, tok: str, endpoint: str, name: str, org: int, v: bool) -> Optional[Dict[str, Any]]:
@@ -388,6 +426,14 @@ def resolve_cred_ids(aap: str, tok: str, org: int, v: bool,
             ids.append(cid)
     return ids
 
+def post_survey_spec_to_aap(aap: str, tok: str, jt_id: int, spec: Dict[str, Any], v: bool) -> None:
+    """
+    POST survey_spec, then enable on the JT.
+    Controller returns 200/204; both are success.
+    """
+    POST(f"{aap}/api/controller/v2/job_templates/{jt_id}/survey_spec/", H(tok), spec, v)
+    PATCH(f"{aap}/api/controller/v2/job_templates/{jt_id}/", H(tok), {"survey_enabled": True}, v)
+
 # ---------------- per-JT migration ----------------
 def ensure_refs(aap: str, tok: str, org: int, v: bool,
                 proj_name: Optional[str], inv_name: Optional[str],
@@ -422,9 +468,21 @@ def migrate_one(args: argparse.Namespace, obj: Dict[str, Any],
     )
 
     # survey (fetch from AWX)
-    survey_spec = None
-    if obj.get("survey_enabled"):
-        survey_spec = awx_jt_survey_spec(args.awx_host, args.awx_token, obj['id'], args.verify_tls)
+    survey_spec = awx_jt_survey_spec(args.awx_host, args.awx_token, obj['id'], args.verify_tls)
+    if survey_spec:
+        if args.dry_run:
+            print("  DRY-RUN: would POST survey_spec and enable survey")
+        else:
+            post_survey_spec_to_aap(args.aap_host, args.aap_token, jt_id, survey_spec, args.verify_tls)
+            # verify
+            try:
+                check = GET(f"{args.aap_host}/api/controller/v2/job_templates/{jt_id}/survey_spec/", H(args.aap_token), args.verify_tls)
+                if isinstance(check, dict) and check.get("spec"):
+                    print(f"  Survey copied & enabled ({len(check['spec'])} question(s))")
+                else:
+                    print("  WARN: survey POSTed but could not verify questions via GET")
+            except Exception as _e:
+                print(f"  WARN: survey POSTed but GET verification failed: {_e}")
 
     existing = find_aap_jt(args.aap_host, args.aap_token, name, args.organization_id, args.verify_tls)
     if existing:

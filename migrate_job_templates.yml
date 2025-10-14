@@ -3,17 +3,24 @@
   hosts: pilotserver
   gather_facts: no
   vars:
+    # Survey inputs
     awx_host: "{{ survey_awx_host }}"
     awx_token: "{{ survey_awx_token }}"
     aap_host: "{{ survey_aap_host }}"
     aap_token: "{{ survey_aap_token }}"
     organization_id: "{{ survey_aap_organization_id }}"
-    # Set this to the AWX API ID to migrate just one JT; leave blank to run bulk.
     template_id: "{{ survey_template_id | default('') }}"
     include_regex: "{{ survey_include_regex | default('') }}"
     exclude_regex: "{{ survey_exclude_regex | default('') }}"
     verify_tls: "{{ survey_verify_tls | default(false) }}"
     dry_run: "{{ survey_dry_run | default(false) }}"
+
+    # Additional survey toggles/overrides (if you expose them)
+    force_ee_id: "{{ survey_force_ee_id | default(5) }}"
+    force_machine_cred_id: "{{ survey_force_machine_cred_id | default(31) }}"
+    with_notifications: "{{ survey_with_notifications | default(false) }}"
+    notif_secrets_file: "{{ survey_notif_secrets_file | default('') }}"
+    with_schedules: "{{ survey_with_schedules | default(false) }}"
 
   tasks:
     - name: Ensure migrator is present
@@ -33,18 +40,100 @@
               '--aap-host', aap_host,
               '--aap-token', aap_token,
               '--organization-id', (organization_id | string),
-              '--force-ee-id', ((force_ee_id | default(5) | int) | string),
-              '--force-machine-cred-id', ((force_machine_cred_id | default(31) | int) | string)
+              '--force-ee-id', ((force_ee_id | int) | string),
+              '--force-machine-cred-id', ((force_machine_cred_id | int) | string)
             ]
             + ( ['--template-id', (template_id | string)] if (template_id | default('') | string | length) > 0 else ['--all'] )
-            + ( ['--with-notifications'] if with_notifications | default(false) | bool else [] )
+            + ( ['--with-notifications'] if with_notifications | bool else [] )
             + ( ['--notif-secrets-file', notif_secrets_file] if (notif_secrets_file | default('') | string | length) > 0 else [] )
-            + ( ['--with-schedules'] if with_schedules | default(false) | bool else [] )
-            + ( ['--dry-run'] if (dry_run | default(false) | bool) else [] )
-            + ( ['--verify-tls'] if (verify_tls | default(false) | bool) else [] )
+            + ( ['--with-schedules'] if with_schedules | bool else [] )
+            + ( ['--dry-run'] if (dry_run | bool) else [] )
+            + ( ['--verify-tls'] if (verify_tls | bool) else [] )
           }}
 
     - name: Run JT migration
       ansible.builtin.command:
         argv: "{{ jt_args }}"
+      register: migrate_cmd
       no_log: false
+
+    # -------- Receipt construction --------
+    - name: Parse metrics from stdout
+      ansible.builtin.set_fact:
+        # IDs of newly created JTs
+        created_jt_ids: "{{ (migrate_cmd.stdout | regex_findall('^CREATED JT: .* -> AAP id (\\d+)', multiline=True)) | list }}"
+        # Surveys (lines printed by script when survey copied/enabled)
+        survey_events: "{{ (migrate_cmd.stdout | regex_findall('^\\s*Survey (?:copied & enabled|POSTed)', multiline=True)) | list }}"
+        # Notifications processed marker
+        notifications_events: "{{ (migrate_cmd.stdout | regex_findall('Processed notifications \\(email\\)', multiline=True)) | list }}"
+        # Credential attachments count (sum of all “Attached N credential(s)”)
+        cred_attach_counts: >-
+          {{
+            (migrate_cmd.stdout | regex_findall('Attached\\s+(\\d+)\\s+credential\\(s\\)', multiline=True))
+            | map('int') | list
+          }}
+        # Schedules created count (from verification line)
+        schedules_created_counts: >-
+          {{
+            (migrate_cmd.stdout | regex_findall('Schedules created:\\s+(\\d+);', multiline=True))
+            | map('int') | list
+          }}
+        # Skipped-existing markers (bulk)
+        skipped_existing: "{{ (migrate_cmd.stdout | regex_findall('^SKIP \\(exists\\):\\s+.+$', multiline=True)) | list }}"
+        # Filtered markers (bulk)
+        filtered_names: "{{ (migrate_cmd.stdout | regex_findall('^\\[\\d+\\]\\s+SKIP \\(filtered\\):\\s+.+$', multiline=True)) | list }}"
+        # Warnings / Errors (from script prints)
+        warn_lines: "{{ (migrate_cmd.stdout | regex_findall('^\\s*WARN:.*$', multiline=True)) | list }}"
+        err_lines:  "{{ (migrate_cmd.stdout | regex_findall('^\\s*ERROR:.*$', multiline=True)) | list }}"
+
+    - name: Build receipt object
+      ansible.builtin.set_fact:
+        migration_receipt:
+          mode: "{{ 'single' if (template_id | default('') | string | length) > 0 else 'bulk' }}"
+          dry_run: "{{ dry_run | bool }}"
+          verify_tls: "{{ verify_tls | bool }}"
+          args:
+            awx_host: "{{ awx_host }}"
+            aap_host: "{{ aap_host }}"
+            organization_id: "{{ organization_id | int }}"
+            template_id: "{{ template_id | default('') }}"
+            include_regex: "{{ include_regex | default('') }}"
+            exclude_regex: "{{ exclude_regex | default('') }}"
+            force_ee_id: "{{ force_ee_id | int }}"
+            force_machine_cred_id: "{{ force_machine_cred_id | int }}"
+            with_notifications: "{{ with_notifications | bool }}"
+            notif_secrets_file: "{{ (notif_secrets_file | default('')) if (notif_secrets_file | default('') | string | length) > 0 else omit }}"
+            with_schedules: "{{ with_schedules | bool }}"
+          execution:
+            rc: "{{ migrate_cmd.rc }}"
+            changed: "{{ migrate_cmd.changed | default(false) }}"
+          results:
+            created_job_templates:
+              count: "{{ created_jt_ids | length }}"
+              ids: "{{ created_jt_ids }}"
+            surveys:
+              copied_enabled_count: "{{ survey_events | length }}"
+            notifications:
+              processed_email_count: "{{ notifications_events | length }}"
+            credentials:
+              total_attach_events: "{{ cred_attach_counts | length }}"
+              total_attached_sum: "{{ (cred_attach_counts | length) | ternary(cred_attach_counts | sum, 0) }}"
+            schedules:
+              created_sum: "{{ (schedules_created_counts | length) | ternary(schedules_created_counts | sum, 0) }}"
+            skipped_existing_count: "{{ skipped_existing | length }}"
+            filtered_count: "{{ filtered_names | length }}"
+            warnings: "{{ warn_lines }}"
+            errors: "{{ err_lines }}"
+          raw:
+            stdout: "{{ migrate_cmd.stdout }}"
+            stderr: "{{ migrate_cmd.stderr }}"
+
+    - name: Show migration receipt (console)
+      ansible.builtin.debug:
+        msg: "{{ migration_receipt | to_nice_yaml }}"
+
+    - name: Write migration receipt to file on target
+      ansible.builtin.copy:
+        dest: "./migration_receipt.yaml"
+        content: "{{ migration_receipt | to_nice_yaml }}"
+        mode: '0644'
