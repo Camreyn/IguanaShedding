@@ -263,9 +263,8 @@ def filt(name: str, inc: Optional[Pattern[str]], exc: Optional[Pattern[str]]) ->
     return True
 
 def jt_payload_from_awx(obj: Dict[str, Any], org: int,
-                        proj_id: Optional[int], inv_id: Optional[int], ee_id: Optional[int],
-                        survey_spec: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    p = {
+                        proj_id: Optional[int], inv_id: Optional[int], ee_id: Optional[int]) -> Dict[str, Any]:
+    return {
         "name": obj.get("name", "Migrated JT"),
         "description": obj.get("description", "") or "",
         "job_type": obj.get("job_type", "run"),
