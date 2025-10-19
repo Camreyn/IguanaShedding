@@ -42,7 +42,7 @@
               '--organization-id', (organization_id | string),
               '--force-ee-id', ((force_ee_id | default(5) | int) | string),
               '--force-machine-cred-id', ((force_machine_cred_id | default(31) | int) | string),
-              '--force-inventory-id', ((force_inventory_id | default(50) | int) | string)   # <—
+              '--force-inventory-id', ((force_inventory_id | default(50) | int) | string)
             ]
             + ( ['--template-id', (template_id | string)] if (template_id | default('') | string | length) > 0 else ['--all'] )
             + ( ['--with-notifications'] if with_notifications | default(false) | bool else [] )
