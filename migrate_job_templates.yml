@@ -63,7 +63,7 @@
         migration_events_raw: >-
           {{
             migrate_cmd.stdout.splitlines()
-            | select('search', '^\\{')            # lines that look like JSON
+            | select('search', '^\\{')
             | list
           }}
 
