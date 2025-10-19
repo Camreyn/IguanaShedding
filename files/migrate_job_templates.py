@@ -38,6 +38,13 @@ TIMEOUT = 30
 RRULE_DT_RE   = re.compile(r"^DTSTART(?:;TZID=[^:]+)?:", re.IGNORECASE | re.MULTILINE)
 RRULE_RULE_RE = re.compile(r"^RRULE:", re.IGNORECASE | re.MULTILINE)
 
+_ALLOWED_RRULE_KEYS = {
+    "FREQ","INTERVAL","COUNT","UNTIL","BYSECOND","BYMINUTE","BYHOUR","BYDAY",
+    "BYMONTHDAY","BYYEARDAY","BYWEEKNO","BYMONTH","BYSETPOS","WKST"
+}
+
+_TZ_ALIASES = {"American/Chicago": "America/Chicago"}  # common typo
+
 SAFE_SCHEDULE_KEYS = {
     "name", "rrule", "enabled", "unified_job_template", "timezone",
     # Optional job overrides that Controller accepts on schedules:
@@ -221,13 +228,79 @@ def normalize_rrule(raw_rrule: str, next_run: Optional[str], timezone_str: Optio
 
     return r, tz
 
-def _parse_iso(dt: str) -> Optional[datetime]:
+def _canon_tz(tz: Optional[str]) -> Optional[str]:
+    if not tz:
+        return None
+    tz = _TZ_ALIASES.get(tz, tz)
     try:
-        if dt.endswith("Z"):
-            return datetime.fromisoformat(dt.replace("Z", "+00:00"))
-        return datetime.fromisoformat(dt)
+        from zoneinfo import ZoneInfo
+        ZoneInfo(tz)  # validate
+        return tz
     except Exception:
         return None
+    
+def _parse_iso(dt: str) -> Optional[datetime.datetime]:
+    try:
+        if dt.endswith("Z"):
+            return datetime.datetime.fromisoformat(dt.replace("Z", "+00:00"))
+        return datetime.datetime.fromisoformat(dt)
+    except Exception:
+        return None
+    
+def _mk_dtstart(next_run_iso: Optional[str], tz: Optional[str]) -> str:
+    """
+    Build a valid DTSTART line. Prefer TZ-aware DTSTART if tz is valid; else UTC Z.
+    If next_run_iso missing/bad, use current UTC to satisfy Controller.
+    """
+    d = _parse_iso(next_run_iso) or datetime.datetime.now(datetime.timezone.utc)
+    tz_canon = _canon_tz(tz)
+    if tz_canon:
+        try:
+            from zoneinfo import ZoneInfo
+            d_local = d.astimezone(ZoneInfo(tz_canon))
+            return f"DTSTART;TZID={tz_canon}:{d_local.strftime('%Y%m%dT%H%M%S')}"
+        except Exception:
+            pass
+    d_utc = d.astimezone(datetime.timezone.utc)
+    return f"DTSTART:{d_utc.strftime('%Y%m%dT%H%M%SZ')}"
+
+def _clean_rrule_line(rrule_line: str) -> str:
+    """
+    Remove any illegal tokens like embedded DTSTART inside RRULE,
+    keep only allowed RRULE key=value pairs, ensure FREQ, default INTERVAL=1.
+    Input may be 'RRULE:...' or just 'FREQ=...;...'.
+    """
+    s = rrule_line.strip()
+    if not s:
+        return "RRULE:FREQ=DAILY;INTERVAL=1"
+    if s.upper().startswith("RRULE:"):
+        s = s[len("RRULE:"):]
+    parts = [p.strip() for p in s.split(';') if p.strip()]
+    kept: List[str] = []
+    for p in parts:
+        if ':' in p:
+            # garbage like 'DTSTART;TZID=...:20231207T073000' sneaked in
+            key = p.split(':', 1)[0].upper()
+            if key.startswith("DTSTART"):
+                continue
+            # If malformed with colon, skip entirely
+            continue
+        key, _, val = p.partition('=')
+        if not _:
+            continue
+        key_u = key.strip().upper()
+        if key_u == "DTSTART":   # explicit guard
+            continue
+        if key_u in _ALLOWED_RRULE_KEYS and val.strip():
+            kept.append(f"{key_u}={val.strip()}")
+    # ensure essentials
+    have_freq = any(x.startswith("FREQ=") for x in kept)
+    if not have_freq:
+        kept.insert(0, "FREQ=DAILY")
+    have_interval = any(x.startswith("INTERVAL=") for x in kept)
+    if not have_interval:
+        kept.append("INTERVAL=1")
+    return "RRULE:" + ";".join(kept)
     
 def _format_dtstart(next_run_iso: Optional[str], tz: Optional[str]) -> str:
     """
@@ -246,23 +319,21 @@ def _format_dtstart(next_run_iso: Optional[str], tz: Optional[str]) -> str:
     d = d.astimezone(timezone.utc)
     return f"DTSTART:{d.strftime('%Y%m%dT%H%M%SZ')}"
 
-def schedule_payload_minimal(s: Dict[str, Any], jt_id: int, jt_inventory_id: Optional[int], aap_host: str) -> Dict[str, Any]:
-    fixed_rrule, tz = normalize_rrule(
-        s.get("rrule", ""),
-        s.get("next_run") or s.get("next_run_original"),
-        s.get("timezone")
+def schedule_payload_minimal(s: Dict[str, Any], jt_id: int, jt_inventory_id: Optional[int]) -> Dict[str, Any]:
+    fixed, tz = sanitize_rrule(
+        s.get("rrule", ""), s.get("next_run") or s.get("next_run_original"), s.get("timezone")
     )
     p: Dict[str, Any] = {
         "name": s.get("name", ""),
         "enabled": bool(s.get("enabled", True)),
         "unified_job_template": jt_id,
-        "rrule": fixed_rrule,
+        "rrule": fixed,
     }
     if tz:                           p["timezone"] = tz
     if jt_inventory_id is not None: p["inventory"] = jt_inventory_id
     if s.get("extra_data"):          p["extra_data"] = s["extra_data"]
     if s.get("scm_branch"):          p["scm_branch"] = s["scm_branch"]
-    if s.get("limit"):               p["limit"] = s["limit"]           # preserve limit
+    if s.get("limit"):               p["limit"] = s["limit"]  # preserve
     if s.get("job_tags"):            p["job_tags"] = s["job_tags"]
     if s.get("skip_tags"):           p["skip_tags"] = s["skip_tags"]
     if s.get("verbosity") is not None: p["verbosity"] = int(s.get("verbosity") or 0)
@@ -271,53 +342,51 @@ def schedule_payload_minimal(s: Dict[str, Any], jt_id: int, jt_inventory_id: Opt
     if s.get("execution_environment"): p["execution_environment"] = s["execution_environment"]
     return p
 
-def schedule_payload_bareminimum(s: Dict[str, Any], jt_id: int, jt_inventory_id: Optional[int], aap_host: str) -> Dict[str, Any]:
-    fixed_rrule, tz = normalize_rrule(
-        s.get("rrule", ""),
-        s.get("next_run") or s.get("next_run_original"),
-        s.get("timezone")
+def schedule_payload_bareminimum(s: Dict[str, Any], jt_id: int, jt_inventory_id: Optional[int]) -> Dict[str, Any]:
+    fixed, tz = sanitize_rrule(
+        s.get("rrule", ""), s.get("next_run") or s.get("next_run_original"), s.get("timezone")
     )
     p: Dict[str, Any] = {
         "name": s.get("name", ""),
         "enabled": bool(s.get("enabled", True)),
         "unified_job_template": jt_id,
-        "rrule": fixed_rrule,
+        "rrule": fixed,
     }
     if tz:                           p["timezone"] = tz
     if jt_inventory_id is not None: p["inventory"] = jt_inventory_id
-    if s.get("limit"):               p["limit"] = s["limit"]           # keep limit even in fallback
+    if s.get("limit"):               p["limit"] = s["limit"]  # keep limit even in fallback
     return p
+
+def _validate_ujt(aap_host: str, tok: str, verify: bool, jt_id: int) -> None:
+    # Proactively confirm the JT exists and is accessible (avoids “Bad data in related field”)
+    r = requests.get(f"{aap_host}/api/controller/v2/job_templates/{jt_id}/",
+                     headers=H(tok), verify=verify, timeout=TIMEOUT)
+    if r.status_code != 200:
+        raise RuntimeError(f"Unified Job Template {jt_id} not accessible: {r.status_code} {r.text}")
 
 def try_create_schedule(aap_host: str, aap_tok: str, verify: bool,
                         jt_id: int, jt_inventory_id: Optional[int], s: Dict[str, Any]) -> bool:
-    """
-    Attempts (in order):
-      1) full payload (UJT id)           with JT inventory
-      2) full payload (UJT URL)          with JT inventory
-      3) bare-min payload (UJT id)       with JT inventory
-      4) bare-min payload (UJT URL)      with JT inventory
-    Emits NDJSON events with details (payload subset + server message).
-    """
+    _validate_ujt(aap_host, aap_tok, verify, jt_id)
+
     def with_ujt_url(payload: Dict[str, Any]) -> Dict[str, Any]:
-        u = f"{aap_host}/api/controller/v2/job_templates/{jt_id}/"
         q = dict(payload)
-        q["unified_job_template"] = u
+        q["unified_job_template"] = f"{aap_host}/api/controller/v2/job_templates/{jt_id}/"
         return q
 
     variants = [
-        ("full-id",  schedule_payload_minimal(s, jt_id, jt_inventory_id, aap_host)),
-        ("full-url", with_ujt_url(schedule_payload_minimal(s, jt_id, jt_inventory_id, aap_host))),
-        ("bare-id",  schedule_payload_bareminimum(s, jt_id, jt_inventory_id, aap_host)),
-        ("bare-url", with_ujt_url(schedule_payload_bareminimum(s, jt_id, jt_inventory_id, aap_host))),
+        ("full-id",  schedule_payload_minimal(s, jt_id, jt_inventory_id)),
+        ("full-url", with_ujt_url(schedule_payload_minimal(s, jt_id, jt_inventory_id))),
+        ("bare-id",  schedule_payload_bareminimum(s, jt_id, jt_inventory_id)),
+        ("bare-url", with_ujt_url(schedule_payload_bareminimum(s, jt_id, jt_inventory_id))),
     ]
-
     for idx, (label, pl) in enumerate(variants, start=1):
         try:
             POST(f"{aap_host}/api/controller/v2/schedules/", H(aap_tok), pl, verify)
-            emit("schedule.create.ok", attempt=idx, variant=label, name=pl.get("name",""), ujt=str(pl.get("unified_job_template")))
+            emit("schedule.create.ok", attempt=idx, variant=label,
+                 name=pl.get("name",""), ujt=str(pl.get("unified_job_template")),
+                 timezone=pl.get("timezone"), rrule=pl.get("rrule"))
             return True
         except Exception as e:
-            # log compact payload diagnostics
             diag = {k: pl.get(k) for k in ("name","unified_job_template","timezone","rrule","inventory","limit")}
             emit("schedule.create.fail", attempt=idx, variant=label, payload=diag, error=str(e))
     return False
@@ -340,6 +409,49 @@ def sanitize_timezone(tz: Optional[str]) -> Optional[str]:
             return None
     # If ZoneInfo not available, pass fixed value
     return tz_fixed
+
+def sanitize_rrule(raw_rrule: str,
+                   next_run_iso: Optional[str],
+                   timezone_str: Optional[str]) -> Tuple[str, Optional[str]]:
+    """
+    Make a Controller-safe 2-line string with exactly one DTSTART (outside RRULE).
+    - Extract & remove any existing DTSTART (either as its own line or embedded in RRULE)
+    - Normalize RRULE to allowed keys only; ensure FREQ + INTERVAL
+    - If no DTSTART found/provided, synthesize from next_run (or now)
+    Returns (rrule_text, tz_used)
+    """
+    tz = _canon_tz(timezone_str)
+    r = (raw_rrule or "").strip()
+    lines = [ln.strip() for ln in r.splitlines() if ln.strip()]
+
+    dtstart_line: Optional[str] = None
+    rrule_src = ""
+
+    for ln in lines:
+        if ln.upper().startswith("DTSTART"):
+            dtstart_line = ln  # take the first DTSTART we see; ignore others
+            continue
+        if ln.upper().startswith("RRULE"):
+            # strip any embedded DTSTART from after 'RRULE:' token
+            rrule_src = ln
+            continue
+        # If line is neither DTSTART nor RRULE but contains FREQ=..., treat as RRULE content
+        if "FREQ=" in ln.upper():
+            rrule_src = ln
+
+    # If no explicit lines, maybe all content was a single string with space
+    if not dtstart_line and not rrule_src and r:
+        if "FREQ=" in r.upper():
+            rrule_src = r
+
+    clean_rrule = _clean_rrule_line(rrule_src)
+
+    if not dtstart_line:
+        dtstart_line = _mk_dtstart(next_run_iso, tz)
+
+    # Final: exactly two lines
+    final = f"{dtstart_line}\n{clean_rrule}"
+    return final, tz
 
 # ---------------- AAP lookups & asserts ----------------
 def q_one(aap: str, tok: str, endpoint: str, name: str, org: int, v: bool) -> Optional[Dict[str, Any]]:
@@ -693,8 +805,8 @@ def migrate_one(args: argparse.Namespace, obj: Dict[str, Any],
         created_cnt = 0
         for s in schedules:
             nm = s.get("name","")
-            raw_rrule = (s.get("rrule") or "").strip()
-            if not raw_rrule:
+            raw = (s.get("rrule") or "").strip()
+            if not raw:
                 print(f"  WARN: schedule '{nm}' has empty rrule; skipped")
                 emit("schedule.skip.empty_rrule", name=nm)
                 continue
@@ -703,18 +815,13 @@ def migrate_one(args: argparse.Namespace, obj: Dict[str, Any],
                 emit("schedule.dryrun", name=nm)
                 created_cnt += 1
                 continue
-            ok = try_create_schedule(
-                args.aap_host, args.aap_token, args.verify_tls,
-                jt_id,   # from created/found earlier
-                inv_id,  # force schedules to use JT inventory
-                s
-            )
+            ok = try_create_schedule(args.aap_host, args.aap_token, args.verify_tls, jt_id, inv_id, s)
             if ok:
                 created_cnt += 1
             else:
                 print(f"  WARN: giving up on schedule '{nm}' after 4 attempts")
                 emit("schedule.create.giveup", name=nm)
-    
+
         # verify
         try:
             aap_scheds = GET(f"{args.aap_host}/api/controller/v2/job_templates/{jt_id}/schedules/?page_size=200",
