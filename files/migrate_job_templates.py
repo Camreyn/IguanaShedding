@@ -88,7 +88,7 @@ def parse_args() -> argparse.Namespace:
         '--force-inventory-id',
         type=int,
         default=(int(env_force_inv_id) if env_force_inv_id and env_force_inv_id.isdigit() else 50),
-        help='AAP Inventory API ID to set on migrated JTs and their schedules (default: 50).'
+        help='AAP Inventory API ID to set on migrated JTs and schedules (default: 50).'
     )
 
     # Optional features
@@ -467,6 +467,18 @@ def sanitize_rrule(raw_rrule: str,
     final = f"{dtstart_line}\n{clean_rrule}"
     return final, tz
 
+def assert_inventory_exists_by_id(aap: str, tok: str, inv_id: int, org_id: int, v: bool) -> None:
+    """
+    Validate that an inventory with id=inv_id exists and belongs to the target org.
+    """
+    d = GET(f"{aap}/api/controller/v2/inventories/{inv_id}/", H(tok), v)
+    inv_org = d.get('organization')
+    if inv_org not in (None, org_id):
+        raise RuntimeError(
+            f"Inventory id {inv_id} belongs to organization {inv_org}, "
+            f"which does not match target org {org_id}."
+        )
+
 # ---------------- AAP lookups & asserts ----------------
 def q_one(aap: str, tok: str, endpoint: str, name: str, org: int, v: bool) -> Optional[Dict[str, Any]]:
     from requests.utils import quote
@@ -719,6 +731,10 @@ def ensure_refs(aap: str, tok: str, org: int, v: bool,
                 _inv_name_unused: Optional[str],
                 forced_ee_id: Optional[int],
                 forced_inv_id: int) -> Tuple[Optional[int], Optional[int], Optional[int]]:
+    """
+    Resolve references for the JT. Project by name; EE by forced id; Inventory by forced id.
+    Returns (project_id, inventory_id, ee_id).
+    """
     proj_id = ee_id = None
 
     if proj_name:
@@ -732,7 +748,7 @@ def ensure_refs(aap: str, tok: str, org: int, v: bool,
     assert_ee_exists_by_id(aap, tok, forced_ee_id, org, v)
     ee_id = forced_ee_id
 
-    # inventory is always the forced one
+    # Always force the inventory to the provided AAP id (e.g., 50)
     assert_inventory_exists_by_id(aap, tok, forced_inv_id, org, v)
     inv_id = forced_inv_id
 
