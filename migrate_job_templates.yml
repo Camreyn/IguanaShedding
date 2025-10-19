@@ -58,75 +58,28 @@
       no_log: false
 
     # -------- Receipt construction --------
-    - name: Parse metrics from stdout
+    - name: Extract NDJSON events from stdout (one JSON per line)
       ansible.builtin.set_fact:
-        # IDs of newly created JTs
-        created_jt_ids: "{{ (migrate_cmd.stdout | regex_findall('^CREATED JT: .* -> AAP id (\\d+)', multiline=True)) | list }}"
-        # Surveys (lines printed by script when survey copied/enabled)
-        survey_events: "{{ (migrate_cmd.stdout | regex_findall('^\\s*Survey (?:copied & enabled|POSTed)', multiline=True)) | list }}"
-        # Notifications processed marker
-        notifications_events: "{{ (migrate_cmd.stdout | regex_findall('Processed notifications \\(email\\)', multiline=True)) | list }}"
-        # Credential attachments count (sum of all “Attached N credential(s)”)
-        cred_attach_counts: >-
+        migration_events_raw: >-
           {{
-            (migrate_cmd.stdout | regex_findall('Attached\\s+(\\d+)\\s+credential\\(s\\)', multiline=True))
-            | map('int') | list
+            migrate_cmd.stdout.splitlines()
+            | select('search', '^\\{')            # lines that look like JSON
+            | list
           }}
-        # Schedules created count (from verification line)
-        schedules_created_counts: >-
-          {{
-            (migrate_cmd.stdout | regex_findall('Schedules created:\\s+(\\d+);', multiline=True))
-            | map('int') | list
-          }}
-        # Skipped-existing markers (bulk)
-        skipped_existing: "{{ (migrate_cmd.stdout | regex_findall('^SKIP \\(exists\\):\\s+.+$', multiline=True)) | list }}"
-        # Filtered markers (bulk)
-        filtered_names: "{{ (migrate_cmd.stdout | regex_findall('^\\[\\d+\\]\\s+SKIP \\(filtered\\):\\s+.+$', multiline=True)) | list }}"
-        # Warnings / Errors (from script prints)
-        warn_lines: "{{ (migrate_cmd.stdout | regex_findall('^\\s*WARN:.*$', multiline=True)) | list }}"
-        err_lines:  "{{ (migrate_cmd.stdout | regex_findall('^\\s*ERROR:.*$', multiline=True)) | list }}"
 
-    - name: Build receipt object
-      ansible.builtin.set_fact:
-        migration_receipt:
-          mode: "{{ 'single' if (template_id | default('') | string | length) > 0 else 'bulk' }}"
-          dry_run: "{{ dry_run | bool }}"
-          verify_tls: "{{ verify_tls | bool }}"
-          args:
-            awx_host: "{{ awx_host }}"
-            aap_host: "{{ aap_host }}"
-            organization_id: "{{ organization_id | int }}"
-            template_id: "{{ template_id | default('') }}"
-            include_regex: "{{ include_regex | default('') }}"
-            exclude_regex: "{{ exclude_regex | default('') }}"
-            force_ee_id: "{{ force_ee_id | int }}"
-            force_machine_cred_id: "{{ force_machine_cred_id | int }}"
-            with_notifications: "{{ with_notifications | bool }}"
-            notif_secrets_file: "{{ (notif_secrets_file | default('')) if (notif_secrets_file | default('') | string | length) > 0 else omit }}"
-            with_schedules: "{{ with_schedules | bool }}"
-          execution:
-            rc: "{{ migrate_cmd.rc }}"
-            changed: "{{ migrate_cmd.changed | default(false) }}"
-          results:
-            created_job_templates:
-              count: "{{ created_jt_ids | length }}"
-              ids: "{{ created_jt_ids }}"
-            surveys:
-              copied_enabled_count: "{{ survey_events | length }}"
-            notifications:
-              processed_email_count: "{{ notifications_events | length }}"
-            credentials:
-              total_attach_events: "{{ cred_attach_counts | length }}"
-              total_attached_sum: "{{ (cred_attach_counts | length) | ternary(cred_attach_counts | sum, 0) }}"
-            schedules:
-              created_sum: "{{ (schedules_created_counts | length) | ternary(schedules_created_counts | sum, 0) }}"
-            skipped_existing_count: "{{ skipped_existing | length }}"
-            filtered_count: "{{ filtered_names | length }}"
-            warnings: "{{ warn_lines }}"
-            errors: "{{ err_lines }}"
-          raw:
-            stdout: "{{ migrate_cmd.stdout }}"
-            stderr: "{{ migrate_cmd.stderr }}"
+    - name: Parse events and write pretty JSON receipt
+      vars:
+        parsed_events: "{{ migration_events_raw | map('from_json') | list }}"
+      block:
+        - name: Show parsed events (human-readable)
+          ansible.builtin.debug:
+            msg: "{{ parsed_events | to_nice_json }}"
+
+        - name: Save parsed events to file (target host)
+          ansible.builtin.copy:
+            dest: "./migration_events.json"
+            content: "{{ parsed_events | to_nice_json }}"
+            mode: '0644'
 
     - name: Show migration receipt (console)
       ansible.builtin.debug:

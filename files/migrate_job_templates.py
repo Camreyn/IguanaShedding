@@ -22,7 +22,12 @@ import sys
 import datetime
 import re
 import json
-from typing import Any, Dict, Iterable, Optional, Tuple, Pattern, List
+from typing import Any, Optional, Dict, Iterable, Optional, Tuple, Pattern, List
+from datetime import datetime, timezone
+try:
+    from zoneinfo import ZoneInfo  # py>=3.9
+except Exception:  # pragma: no cover
+    ZoneInfo = None
 
 import requests
 import urllib3
@@ -30,8 +35,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TIMEOUT = 30
 
-RRULE_DT_RE = re.compile(r"DTSTART[:;]", re.IGNORECASE)
-RRULE_RULE_RE = re.compile(r"\bRRULE:", re.IGNORECASE)
+RRULE_DT_RE = re.compile(r"^DTSTART(?:;TZID=[^:]+)?:", re.IGNORECASE | re.MULTILINE)
+RRULE_RULE_RE = re.compile(r"^RRULE:", re.IGNORECASE | re.MULTILINE)
 
 SAFE_SCHEDULE_KEYS = {
     "name", "rrule", "enabled", "unified_job_template", "timezone",
@@ -117,6 +122,12 @@ def ping(aap: str, tok: str, v: bool) -> None:
     r = requests.get(u, headers=H(tok), verify=v, timeout=TIMEOUT)
     if r.status_code != 200:
         raise RuntimeError(f"AAP ping {r.status_code}: {r.text}")
+    
+def emit(event: str, **fields: Any) -> None:
+    """Emit one JSON line (NDJSON) for machine-readable logs in AWX."""
+    rec = {"ts": datetime.now(timezone.utc).isoformat(), "event": event}
+    rec.update(fields)
+    print(json.dumps(rec, separators=(",", ":"), ensure_ascii=False))
 
 # ---------------- AWX reads ----------------
 def awx_jt(a: str, t: str, i: int, v: bool) -> Dict[str, Any]:
@@ -181,80 +192,59 @@ def iso_to_ics_dtstart(dt: str) -> str:
     except Exception:
         return ""
 
-def normalize_rrule(raw_rrule: str, next_run: Optional[str], timezone: Optional[str]) -> Tuple[str, Optional[str]]:
-    """
-    Ensure RRULE string is acceptable by Controller:
-      - Ensure DTSTART exists (craft from next_run if missing)
-      - Ensure there's a newline between DTSTART and RRULE sections
-    Return (fixed_rrule, tz) where tz is passed separately if present.
-    """
+def normalize_rrule(raw_rrule: str, next_run: Optional[str], timezone_str: Optional[str]) -> Tuple[str, Optional[str]]:
     r = (raw_rrule or "").strip()
     if not r:
-        return r, timezone
+        return r, timezone_str
 
-    has_dtstart = bool(RRULE_DT_RE.search(r))
-    has_rrule = bool(RRULE_RULE_RE.search(r))
-
-    # If 'DTSTART:...' and 'RRULE:...' are on one line separated by a space, split into lines
-    r = r.replace("DTSTART:", "DTSTART:")  # no-op, keeps intent clear
-    # Normalize any accidental 'DTSTART... RRULE...' to have a newline
+    # Ensure DTSTART on its own line, then RRULE on next line
     r = re.sub(r"(DTSTART[^\n]+)\s+(RRULE:)", r"\\1\n\\2", r, flags=re.IGNORECASE)
 
-    if not has_dtstart:
-        # Try to build DTSTART from AWX 'next_run'
-        if next_run:
-            dt = iso_to_ics_dtstart(next_run)
-            if dt:
-                prefix = f"DTSTART:{dt}"
-                # If RRULE: present, ensure it's on its own line after DTSTART
-                if has_rrule:
-                    # Make sure 'RRULE:' begins on a new line
-                    r = RRULE_RULE_RE.sub("\nRRULE:", r) if not r.startswith("RRULE:") else r
-                    if not r.startswith("RRULE:") and not r.upper().startswith("DTSTART:"):
-                        r = f"{prefix}\n{r}"
-                    elif r.upper().startswith("RRULE:"):
-                        r = f"{prefix}\n{r}"
-                else:
-                    # No RRULE keyword? Pass through as-is (Controller will reject, we’ll log)
-                    r = f"{prefix}\n{r}"
-        # else: leave as-is; creation may fail and we’ll log the server message
+    has_dtstart = bool(RRULE_DT_RE.search(r))
+    has_rrule   = bool(RRULE_RULE_RE.search(r))
+    dt_line = _format_dtstart(next_run, timezone_str) if not has_dtstart else None
 
-    return r, timezone
+    # If RRULE is missing the keyword, leave as is (Controller will complain—we’ll log it)
+    if dt_line:
+        if has_rrule:
+            # ensure DTSTART precedes RRULE
+            if r.upper().startswith("RRULE:"):
+                r = f"{dt_line}\n{r}"
+            elif not r.upper().startswith("DTSTART"):
+                r = f"{dt_line}\n{r}"
+        else:
+            r = f"{dt_line}\n{r}"
+
+    return r, timezone_str
+
+def _parse_iso(dt: str) -> Optional[datetime]:
+    try:
+        if dt.endswith("Z"):
+            return datetime.fromisoformat(dt.replace("Z", "+00:00"))
+        return datetime.fromisoformat(dt)
+    except Exception:
+        return None
+    
+def _format_dtstart(next_run_iso: Optional[str], tz: Optional[str]) -> Optional[str]:
+    """
+    Prefer TZ-aware DTSTART if we have a timezone; otherwise UTC 'Z'.
+    """
+    if not next_run_iso:
+        return None
+    d = _parse_iso(next_run_iso)
+    if not d:
+        return None
+    if tz and ZoneInfo:
+        try:
+            d = d.astimezone(ZoneInfo(tz))
+            return f"DTSTART;TZID={tz}:{d.strftime('%Y%m%dT%H%M%S')}"
+        except Exception:
+            pass
+    # fallback UTC
+    d = d.astimezone(timezone.utc)
+    return f"DTSTART:{d.strftime('%Y%m%dT%H%M%SZ')}"
 
 def schedule_payload_minimal(s: Dict[str, Any], jt_id: int, jt_inventory_id: Optional[int], aap_host: str) -> Dict[str, Any]:
-    """
-    Primary schedule payload:
-    - Forces inventory to the JT's resolved inventory (if available) to avoid missing AWX inventories in AAP.
-    - Preserves 'limit' and other safe overrides.
-    """
-    fixed_rrule, tz = normalize_rrule(
-        s.get("rrule", ""),
-        s.get("next_run") or s.get("next_run_original"),
-        s.get("timezone")
-    )
-    p: Dict[str, Any] = {
-        "name": s.get("name", ""),
-        "enabled": bool(s.get("enabled", True)),
-        "unified_job_template": jt_id,  # first attempt: numeric id
-        "rrule": fixed_rrule,
-    }
-    if tz:                           p["timezone"] = tz
-    if jt_inventory_id is not None: p["inventory"] = jt_inventory_id  # <-- force JT inventory
-    if s.get("extra_data"):          p["extra_data"] = s["extra_data"]
-    if s.get("scm_branch"):          p["scm_branch"] = s["scm_branch"]
-    if s.get("limit"):               p["limit"] = s["limit"]           # <-- preserve limit
-    if s.get("job_tags"):            p["job_tags"] = s["job_tags"]
-    if s.get("skip_tags"):           p["skip_tags"] = s["skip_tags"]
-    if s.get("verbosity") is not None: p["verbosity"] = int(s.get("verbosity") or 0)
-    if s.get("forks")     is not None: p["forks"]     = int(s.get("forks") or 0)
-    if s.get("timeout")   is not None: p["timeout"]   = int(s.get("timeout") or 0)
-    if s.get("execution_environment"): p["execution_environment"] = s["execution_environment"]
-    return p
-
-def schedule_payload_bareminimum(s: Dict[str, Any], jt_id: int, jt_inventory_id: Optional[int], aap_host: str) -> Dict[str, Any]:
-    """
-    Fallback payload: only required fields + forced JT inventory if present, and limit.
-    """
     fixed_rrule, tz = normalize_rrule(
         s.get("rrule", ""),
         s.get("next_run") or s.get("next_run_original"),
@@ -267,8 +257,33 @@ def schedule_payload_bareminimum(s: Dict[str, Any], jt_id: int, jt_inventory_id:
         "rrule": fixed_rrule,
     }
     if tz:                           p["timezone"] = tz
-    if jt_inventory_id is not None: p["inventory"] = jt_inventory_id  # <-- force JT inventory
-    if s.get("limit"):               p["limit"] = s["limit"]           # <-- preserve limit
+    if jt_inventory_id is not None: p["inventory"] = jt_inventory_id  # force JT inventory to avoid missing AWX inventories
+    if s.get("extra_data"):          p["extra_data"] = s["extra_data"]
+    if s.get("scm_branch"):          p["scm_branch"] = s["scm_branch"]
+    if s.get("limit"):               p["limit"] = s["limit"]           # preserve limit
+    if s.get("job_tags"):            p["job_tags"] = s["job_tags"]
+    if s.get("skip_tags"):           p["skip_tags"] = s["skip_tags"]
+    if s.get("verbosity") is not None: p["verbosity"] = int(s.get("verbosity") or 0)
+    if s.get("forks")     is not None: p["forks"]     = int(s.get("forks") or 0)
+    if s.get("timeout")   is not None: p["timeout"]   = int(s.get("timeout") or 0)
+    if s.get("execution_environment"): p["execution_environment"] = s["execution_environment"]
+    return p
+
+def schedule_payload_bareminimum(s: Dict[str, Any], jt_id: int, jt_inventory_id: Optional[int], aap_host: str) -> Dict[str, Any]:
+    fixed_rrule, tz = normalize_rrule(
+        s.get("rrule", ""),
+        s.get("next_run") or s.get("next_run_original"),
+        s.get("timezone")
+    )
+    p: Dict[str, Any] = {
+        "name": s.get("name", ""),
+        "enabled": bool(s.get("enabled", True)),
+        "unified_job_template": jt_id,
+        "rrule": fixed_rrule,
+    }
+    if tz:                           p["timezone"] = tz
+    if jt_inventory_id is not None: p["inventory"] = jt_inventory_id
+    if s.get("limit"):               p["limit"] = s["limit"]           # keep limit even in bare-min
     return p
 
 def try_create_schedule(aap_host: str, aap_tok: str, verify: bool,
@@ -279,6 +294,7 @@ def try_create_schedule(aap_host: str, aap_tok: str, verify: bool,
       2) full payload (UJT URL)          with JT inventory
       3) bare-min payload (UJT id)       with JT inventory
       4) bare-min payload (UJT URL)      with JT inventory
+    Emits NDJSON events with details (payload subset + server message).
     """
     def with_ujt_url(payload: Dict[str, Any]) -> Dict[str, Any]:
         u = f"{aap_host}/api/controller/v2/job_templates/{jt_id}/"
@@ -286,19 +302,22 @@ def try_create_schedule(aap_host: str, aap_tok: str, verify: bool,
         q["unified_job_template"] = u
         return q
 
-    payloads = [
-        schedule_payload_minimal(s, jt_id, jt_inventory_id, aap_host),
-        with_ujt_url(schedule_payload_minimal(s, jt_id, jt_inventory_id, aap_host)),
-        schedule_payload_bareminimum(s, jt_id, jt_inventory_id, aap_host),
-        with_ujt_url(schedule_payload_bareminimum(s, jt_id, jt_inventory_id, aap_host)),
+    variants = [
+        ("full-id",  schedule_payload_minimal(s, jt_id, jt_inventory_id, aap_host)),
+        ("full-url", with_ujt_url(schedule_payload_minimal(s, jt_id, jt_inventory_id, aap_host))),
+        ("bare-id",  schedule_payload_bareminimum(s, jt_id, jt_inventory_id, aap_host)),
+        ("bare-url", with_ujt_url(schedule_payload_bareminimum(s, jt_id, jt_inventory_id, aap_host))),
     ]
 
-    for idx, pl in enumerate(payloads, start=1):
+    for idx, (label, pl) in enumerate(variants, start=1):
         try:
             POST(f"{aap_host}/api/controller/v2/schedules/", H(aap_tok), pl, verify)
+            emit("schedule.create.ok", attempt=idx, variant=label, name=pl.get("name",""), ujt=str(pl.get("unified_job_template")))
             return True
         except Exception as e:
-            print(f"    attempt {idx} failed creating schedule '{pl.get('name','')}' -> {e}")
+            # log compact payload diagnostics
+            diag = {k: pl.get(k) for k in ("name","unified_job_template","timezone","rrule","inventory","limit")}
+            emit("schedule.create.fail", attempt=idx, variant=label, payload=diag, error=str(e))
     return False
 
 # ---------------- AAP lookups & asserts ----------------
@@ -652,34 +671,39 @@ def migrate_one(args: argparse.Namespace, obj: Dict[str, Any],
         schedules = awx_jt_schedules(args.awx_host, args.awx_token, obj['id'], args.verify_tls)
         created_cnt = 0
         for s in schedules:
+            nm = s.get("name","")
             raw_rrule = (s.get("rrule") or "").strip()
             if not raw_rrule:
-                print(f"  WARN: schedule '{s.get('name','')}' has empty rrule; skipped")
+                print(f"  WARN: schedule '{nm}' has empty rrule; skipped")
+                emit("schedule.skip.empty_rrule", name=nm)
                 continue
             if args.dry_run:
-                print(f"  DRY-RUN: would create schedule '{s.get('name','')}' (force JT inventory, keep limit)")
+                print(f"  DRY-RUN: would create schedule '{nm}' (force JT inventory, keep limit)")
+                emit("schedule.dryrun", name=nm)
                 created_cnt += 1
                 continue
-    
             ok = try_create_schedule(
                 args.aap_host, args.aap_token, args.verify_tls,
-                jt_id,            # created/found above
-                inv_id,           # <-- pass the JT inventory id (resolved earlier)
+                jt_id,   # from created/found earlier
+                inv_id,  # force schedules to use JT inventory
                 s
             )
             if ok:
                 created_cnt += 1
             else:
-                print(f"  WARN: giving up on schedule '{s.get('name','')}' after 4 attempts")
+                print(f"  WARN: giving up on schedule '{nm}' after 4 attempts")
+                emit("schedule.create.giveup", name=nm)
     
-        # verify on AAP
+        # verify
         try:
             aap_scheds = GET(f"{args.aap_host}/api/controller/v2/job_templates/{jt_id}/schedules/?page_size=200",
                              H(args.aap_token), args.verify_tls)
             total = len(aap_scheds.get("results", []))
             print(f"  Schedules created: {created_cnt}; AAP currently shows {total}")
+            emit("schedule.verify", created=created_cnt, aap_count=total)
         except Exception as _e:
             print(f"  WARN: schedule verification fetch failed: {_e}")
+            emit("schedule.verify.fail", error=str(_e))
 
 # ---------------- main ----------------
 def main() -> int:
