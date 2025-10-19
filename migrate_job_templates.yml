@@ -80,13 +80,3 @@
             dest: "./migration_events.json"
             content: "{{ parsed_events | to_nice_json }}"
             mode: '0644'
-
-    - name: Show migration receipt (console)
-      ansible.builtin.debug:
-        msg: "{{ migration_receipt | to_nice_yaml }}"
-
-    - name: Write migration receipt to file on target
-      ansible.builtin.copy:
-        dest: "./migration_receipt.yaml"
-        content: "{{ migration_receipt | to_nice_yaml }}"
-        mode: '0644'
