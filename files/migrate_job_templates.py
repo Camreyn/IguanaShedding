@@ -242,7 +242,7 @@ def normalize_rrule(raw_rrule: str, next_run: Optional[str], timezone_str: Optio
         if r:
             r = f"{dt_line}\n{r}"
         else:
-            r = dt_line  # degenerate, but Controller will then still complain about missing RRULE, which we add above
+            r = dt_line
 
     return r, tz
 
@@ -297,21 +297,18 @@ def _clean_rrule_line(rrule_line: str) -> str:
     kept: List[str] = []
     for p in parts:
         if ':' in p:
-            # garbage like 'DTSTART;TZID=...:20231207T073000' sneaked in
             key = p.split(':', 1)[0].upper()
             if key.startswith("DTSTART"):
                 continue
-            # If malformed with colon, skip entirely
             continue
         key, _, val = p.partition('=')
         if not _:
             continue
         key_u = key.strip().upper()
-        if key_u == "DTSTART":   # explicit guard
+        if key_u == "DTSTART":
             continue
         if key_u in _ALLOWED_RRULE_KEYS and val.strip():
             kept.append(f"{key_u}={val.strip()}")
-    # ensure essentials
     have_freq = any(x.startswith("FREQ=") for x in kept)
     if not have_freq:
         kept.insert(0, "FREQ=DAILY")
@@ -348,10 +345,10 @@ def schedule_payload_minimal(s: Dict[str, Any], jt_id: int, jt_inventory_id: Opt
         "rrule": fixed_rrule,
     }
     if tz:                           p["timezone"] = tz
-    if jt_inventory_id is not None: p["inventory"] = jt_inventory_id    # force JT inv (AAP id 50)
-    if s.get("extra_data"):          p["extra_data"] = s["extra_data"]  # survey responses
+    if jt_inventory_id is not None: p["inventory"] = jt_inventory_id
+    if s.get("extra_data"):          p["extra_data"] = s["extra_data"]
     if s.get("scm_branch"):          p["scm_branch"] = s["scm_branch"]
-    if s.get("limit"):               p["limit"] = s["limit"]            # preserve limit
+    if s.get("limit"):               p["limit"] = s["limit"]
     if s.get("job_tags"):            p["job_tags"] = s["job_tags"]
     if s.get("skip_tags"):           p["skip_tags"] = s["skip_tags"]
     if s.get("verbosity") is not None: p["verbosity"] = int(s.get("verbosity") or 0)
@@ -373,7 +370,7 @@ def schedule_payload_bareminimum(s: Dict[str, Any], jt_id: int, jt_inventory_id:
     if tz:                           p["timezone"] = tz
     if jt_inventory_id is not None: p["inventory"] = jt_inventory_id
     if s.get("limit"):               p["limit"] = s["limit"]
-    if s.get("extra_data"):          p["extra_data"] = s["extra_data"]  # keep survey answers in fallback too
+    if s.get("extra_data"):          p["extra_data"] = s["extra_data"]
     return p
 
 def _validate_ujt(aap_host: str, tok: str, verify: bool, jt_id: int) -> None:
@@ -448,13 +445,11 @@ def sanitize_rrule(raw_rrule: str,
 
     for ln in lines:
         if ln.upper().startswith("DTSTART"):
-            dtstart_line = ln  # take the first DTSTART we see; ignore others
+            dtstart_line = ln
             continue
         if ln.upper().startswith("RRULE"):
-            # strip any embedded DTSTART from after 'RRULE:' token
             rrule_src = ln
             continue
-        # If line is neither DTSTART nor RRULE but contains FREQ=..., treat as RRULE content
         if "FREQ=" in ln.upper():
             rrule_src = ln
 
