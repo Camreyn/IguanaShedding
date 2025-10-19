@@ -35,7 +35,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TIMEOUT = 30
 
-RRULE_DT_RE = re.compile(r"^DTSTART(?:;TZID=[^:]+)?:", re.IGNORECASE | re.MULTILINE)
+RRULE_DT_RE   = re.compile(r"^DTSTART(?:;TZID=[^:]+)?:", re.IGNORECASE | re.MULTILINE)
 RRULE_RULE_RE = re.compile(r"^RRULE:", re.IGNORECASE | re.MULTILINE)
 
 SAFE_SCHEDULE_KEYS = {
@@ -193,29 +193,33 @@ def iso_to_ics_dtstart(dt: str) -> str:
         return ""
 
 def normalize_rrule(raw_rrule: str, next_run: Optional[str], timezone_str: Optional[str]) -> Tuple[str, Optional[str]]:
+    """
+    Ensure:
+      - DTSTART line present
+      - RRULE line present, prefixed with 'RRULE:'
+      - DTSTART and RRULE are on separate lines, in that order
+    Also returns a sanitized timezone (or None).
+    """
+    tz = sanitize_timezone(timezone_str)
     r = (raw_rrule or "").strip()
-    if not r:
-        return r, timezone_str
 
-    # Ensure DTSTART on its own line, then RRULE on next line
-    r = re.sub(r"(DTSTART[^\n]+)\s+(RRULE:)", r"\\1\n\\2", r, flags=re.IGNORECASE)
+    # If RRULE: is missing, prefix it
+    if r and not RRULE_RULE_RE.search(r):
+        # Some AWX exports contain only the rule body like 'FREQ=DAILY;INTERVAL=1'
+        r = "RRULE:" + r
+
+    # If someone glued DTSTART and RRULE on one line, split them: (correct backrefs!)
+    r = re.sub(r"(DTSTART[^\n]+)\s+(RRULE:)", r"\1\n\2", r, flags=re.IGNORECASE)
 
     has_dtstart = bool(RRULE_DT_RE.search(r))
-    has_rrule   = bool(RRULE_RULE_RE.search(r))
-    dt_line = _format_dtstart(next_run, timezone_str) if not has_dtstart else None
-
-    # If RRULE is missing the keyword, leave as is (Controller will complain—we’ll log it)
-    if dt_line:
-        if has_rrule:
-            # ensure DTSTART precedes RRULE
-            if r.upper().startswith("RRULE:"):
-                r = f"{dt_line}\n{r}"
-            elif not r.upper().startswith("DTSTART"):
-                r = f"{dt_line}\n{r}"
-        else:
+    if not has_dtstart:
+        dt_line = _format_dtstart(next_run, tz)
+        if r:
             r = f"{dt_line}\n{r}"
+        else:
+            r = dt_line  # degenerate, but Controller will then still complain about missing RRULE, which we add above
 
-    return r, timezone_str
+    return r, tz
 
 def _parse_iso(dt: str) -> Optional[datetime]:
     try:
@@ -225,22 +229,20 @@ def _parse_iso(dt: str) -> Optional[datetime]:
     except Exception:
         return None
     
-def _format_dtstart(next_run_iso: Optional[str], tz: Optional[str]) -> Optional[str]:
+def _format_dtstart(next_run_iso: Optional[str], tz: Optional[str]) -> str:
     """
-    Prefer TZ-aware DTSTART if we have a timezone; otherwise UTC 'Z'.
+    Build a valid DTSTART line. Use next_run if provided, else 'now' as last resort.
+    Prefer TZ-aware when a valid timezone is available; otherwise UTC 'Z'.
     """
-    if not next_run_iso:
-        return None
-    d = _parse_iso(next_run_iso)
+    d = _parse_iso(next_run_iso) if next_run_iso else datetime.now(timezone.utc)
     if not d:
-        return None
+        d = datetime.now(timezone.utc)
     if tz and ZoneInfo:
         try:
             d = d.astimezone(ZoneInfo(tz))
             return f"DTSTART;TZID={tz}:{d.strftime('%Y%m%dT%H%M%S')}"
         except Exception:
             pass
-    # fallback UTC
     d = d.astimezone(timezone.utc)
     return f"DTSTART:{d.strftime('%Y%m%dT%H%M%SZ')}"
 
@@ -257,7 +259,7 @@ def schedule_payload_minimal(s: Dict[str, Any], jt_id: int, jt_inventory_id: Opt
         "rrule": fixed_rrule,
     }
     if tz:                           p["timezone"] = tz
-    if jt_inventory_id is not None: p["inventory"] = jt_inventory_id  # force JT inventory to avoid missing AWX inventories
+    if jt_inventory_id is not None: p["inventory"] = jt_inventory_id
     if s.get("extra_data"):          p["extra_data"] = s["extra_data"]
     if s.get("scm_branch"):          p["scm_branch"] = s["scm_branch"]
     if s.get("limit"):               p["limit"] = s["limit"]           # preserve limit
@@ -283,7 +285,7 @@ def schedule_payload_bareminimum(s: Dict[str, Any], jt_id: int, jt_inventory_id:
     }
     if tz:                           p["timezone"] = tz
     if jt_inventory_id is not None: p["inventory"] = jt_inventory_id
-    if s.get("limit"):               p["limit"] = s["limit"]           # keep limit even in bare-min
+    if s.get("limit"):               p["limit"] = s["limit"]           # keep limit even in fallback
     return p
 
 def try_create_schedule(aap_host: str, aap_tok: str, verify: bool,
@@ -319,6 +321,25 @@ def try_create_schedule(aap_host: str, aap_tok: str, verify: bool,
             diag = {k: pl.get(k) for k in ("name","unified_job_template","timezone","rrule","inventory","limit")}
             emit("schedule.create.fail", attempt=idx, variant=label, payload=diag, error=str(e))
     return False
+
+def sanitize_timezone(tz: Optional[str]) -> Optional[str]:
+    if not tz:
+        return None
+    # Common typos/aliases
+    fixes = {
+        "American/Chicago": "America/Chicago",
+        "US/Central": "America/Chicago",
+        "CST6CDT": "America/Chicago",
+    }
+    tz_fixed = fixes.get(tz, tz)
+    if ZoneInfo:
+        try:
+            ZoneInfo(tz_fixed)  # validate
+            return tz_fixed
+        except Exception:
+            return None
+    # If ZoneInfo not available, pass fixed value
+    return tz_fixed
 
 # ---------------- AAP lookups & asserts ----------------
 def q_one(aap: str, tok: str, endpoint: str, name: str, org: int, v: bool) -> Optional[Dict[str, Any]]:
