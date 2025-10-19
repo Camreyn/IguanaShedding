@@ -81,6 +81,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--force-machine-cred-id', type=int,
                    default=(int(env_force_mc_id) if env_force_mc_id and env_force_mc_id.isdigit() else None),
                    help='AAP Credential API ID to attach for any AWX “Machine” creds (e.g., 31).')
+    
+    # Inventory overrides (by AAP ids)
+    env_force_inv_id = os.getenv('FORCE_INVENTORY_ID')
+    p.add_argument(
+        '--force-inventory-id',
+        type=int,
+        default=(int(env_force_inv_id) if env_force_inv_id and env_force_inv_id.isdigit() else 50),
+        help='AAP Inventory API ID to set on migrated JTs and their schedules (default: 50).'
+    )
 
     # Optional features
     p.add_argument('--with-notifications', action='store_true', help='Migrate and attach EMAIL notification templates')
@@ -182,7 +191,16 @@ def awx_jt_notifications(a: str, t: str, jtid: int, v: bool) -> Dict[str, List[D
     }
 
 def awx_jt_schedules(a: str, t: str, jtid: int, v: bool) -> List[Dict[str, Any]]:
-    return list(GET(f"{a}/api/v2/job_templates/{jtid}/schedules/?page_size=200", H(t), v).get("results", []))
+    # First list, then GET each schedule detail to ensure we have extra_data (survey answers), rrule, etc.
+    lst = GET(f"{a}/api/v2/job_templates/{jtid}/schedules/?page_size=200", H(t), v).get("results", [])
+    out: List[Dict[str, Any]] = []
+    for s in lst:
+        sid = s.get("id")
+        if sid is None:
+            continue
+        d = GET(f"{a}/api/v2/schedules/{sid}/", H(t), v)
+        out.append(d)
+    return out
 
 def iso_to_ics_dtstart(dt: str) -> str:
     """
@@ -320,20 +338,20 @@ def _format_dtstart(next_run_iso: Optional[str], tz: Optional[str]) -> str:
     return f"DTSTART:{d.strftime('%Y%m%dT%H%M%SZ')}"
 
 def schedule_payload_minimal(s: Dict[str, Any], jt_id: int, jt_inventory_id: Optional[int]) -> Dict[str, Any]:
-    fixed, tz = sanitize_rrule(
+    fixed_rrule, tz = sanitize_rrule(
         s.get("rrule", ""), s.get("next_run") or s.get("next_run_original"), s.get("timezone")
     )
     p: Dict[str, Any] = {
         "name": s.get("name", ""),
         "enabled": bool(s.get("enabled", True)),
         "unified_job_template": jt_id,
-        "rrule": fixed,
+        "rrule": fixed_rrule,
     }
     if tz:                           p["timezone"] = tz
-    if jt_inventory_id is not None: p["inventory"] = jt_inventory_id
-    if s.get("extra_data"):          p["extra_data"] = s["extra_data"]
+    if jt_inventory_id is not None: p["inventory"] = jt_inventory_id    # force JT inv (AAP id 50)
+    if s.get("extra_data"):          p["extra_data"] = s["extra_data"]  # survey responses
     if s.get("scm_branch"):          p["scm_branch"] = s["scm_branch"]
-    if s.get("limit"):               p["limit"] = s["limit"]  # preserve
+    if s.get("limit"):               p["limit"] = s["limit"]            # preserve limit
     if s.get("job_tags"):            p["job_tags"] = s["job_tags"]
     if s.get("skip_tags"):           p["skip_tags"] = s["skip_tags"]
     if s.get("verbosity") is not None: p["verbosity"] = int(s.get("verbosity") or 0)
@@ -343,18 +361,19 @@ def schedule_payload_minimal(s: Dict[str, Any], jt_id: int, jt_inventory_id: Opt
     return p
 
 def schedule_payload_bareminimum(s: Dict[str, Any], jt_id: int, jt_inventory_id: Optional[int]) -> Dict[str, Any]:
-    fixed, tz = sanitize_rrule(
+    fixed_rrule, tz = sanitize_rrule(
         s.get("rrule", ""), s.get("next_run") or s.get("next_run_original"), s.get("timezone")
     )
     p: Dict[str, Any] = {
         "name": s.get("name", ""),
         "enabled": bool(s.get("enabled", True)),
         "unified_job_template": jt_id,
-        "rrule": fixed,
+        "rrule": fixed_rrule,
     }
     if tz:                           p["timezone"] = tz
     if jt_inventory_id is not None: p["inventory"] = jt_inventory_id
-    if s.get("limit"):               p["limit"] = s["limit"]  # keep limit even in fallback
+    if s.get("limit"):               p["limit"] = s["limit"]
+    if s.get("extra_data"):          p["extra_data"] = s["extra_data"]  # keep survey answers in fallback too
     return p
 
 def _validate_ujt(aap_host: str, tok: str, verify: bool, jt_id: int) -> None:
@@ -701,23 +720,27 @@ def post_survey_spec_to_aap(aap: str, tok: str, jt_id: int, spec: Dict[str, Any]
 
 # ---------------- per-JT migration ----------------
 def ensure_refs(aap: str, tok: str, org: int, v: bool,
-                proj_name: Optional[str], inv_name: Optional[str],
-                forced_ee_id: Optional[int]) -> Tuple[Optional[int], Optional[int], Optional[int]]:
-    proj_id = inv_id = ee_id = None
+                proj_name: Optional[str],
+                _inv_name_unused: Optional[str],
+                forced_ee_id: Optional[int],
+                forced_inv_id: int) -> Tuple[Optional[int], Optional[int], Optional[int]]:
+    proj_id = ee_id = None
+
     if proj_name:
         p = q_one(aap, tok, "projects", proj_name, org, v)
         if not p:
             raise RuntimeError(f"Project '{proj_name}' not found in AAP org {org}")
         proj_id = p['id']
-    if inv_name:
-        i = q_one(aap, tok, "inventories", inv_name, org, v)
-        if not i:
-            raise RuntimeError(f"Inventory '{inv_name}' not found in AAP org {org}")
-        inv_id = i['id']
+
     if forced_ee_id is None:
         raise RuntimeError("You must supply --force-ee-id to set the Execution Environment by API id.")
     assert_ee_exists_by_id(aap, tok, forced_ee_id, org, v)
     ee_id = forced_ee_id
+
+    # inventory is always the forced one
+    assert_inventory_exists_by_id(aap, tok, forced_inv_id, org, v)
+    inv_id = forced_inv_id
+
     return proj_id, inv_id, ee_id
 
 def migrate_one(args: argparse.Namespace, obj: Dict[str, Any],
@@ -730,8 +753,9 @@ def migrate_one(args: argparse.Namespace, obj: Dict[str, Any],
     # Resolve refs (EE forced via --force-ee-id)
     proj_id, inv_id, ee_id = ensure_refs(
         args.aap_host, args.aap_token, args.organization_id, args.verify_tls,
-        proj_name, inv_name, args.force_ee_id
+        proj_name, inv_name, args.force_ee_id, args.force_inventory_id
     )
+
 
     # Always fetch AWX survey spec (even if not enabled there)
     survey_spec = awx_jt_survey_spec(args.awx_host, args.awx_token, obj['id'], args.verify_tls)

@@ -40,15 +40,16 @@
               '--aap-host', aap_host,
               '--aap-token', aap_token,
               '--organization-id', (organization_id | string),
-              '--force-ee-id', ((force_ee_id | int) | string),
-              '--force-machine-cred-id', ((force_machine_cred_id | int) | string)
+              '--force-ee-id', ((force_ee_id | default(5) | int) | string),
+              '--force-machine-cred-id', ((force_machine_cred_id | default(31) | int) | string),
+              '--force-inventory-id', ((force_inventory_id | default(50) | int) | string)   # <—
             ]
             + ( ['--template-id', (template_id | string)] if (template_id | default('') | string | length) > 0 else ['--all'] )
-            + ( ['--with-notifications'] if with_notifications | bool else [] )
+            + ( ['--with-notifications'] if with_notifications | default(false) | bool else [] )
             + ( ['--notif-secrets-file', notif_secrets_file] if (notif_secrets_file | default('') | string | length) > 0 else [] )
-            + ( ['--with-schedules'] if with_schedules | bool else [] )
-            + ( ['--dry-run'] if (dry_run | bool) else [] )
-            + ( ['--verify-tls'] if (verify_tls | bool) else [] )
+            + ( ['--with-schedules'] if with_schedules | default(false) | bool else [] )
+            + ( ['--dry-run'] if (dry_run | default(false) | bool) else [] )
+            + ( ['--verify-tls'] if (verify_tls | default(false) | bool) else [] )
           }}
 
     - name: Run JT migration
