@@ -18,9 +18,9 @@
     # Additional survey toggles/overrides (if you expose them)
     force_ee_id: "{{ survey_force_ee_id | default(5) }}"
     force_machine_cred_id: "{{ survey_force_machine_cred_id | default(31) }}"
-    with_notifications: "{{ survey_with_notifications | default(false) }}"
+    with_notifications: "{{ survey_with_notifications | default(true) }}"
     notif_secrets_file: "{{ survey_notif_secrets_file | default('') }}"
-    with_schedules: "{{ survey_with_schedules | default(false) }}"
+    with_schedules: "{{ survey_with_schedules | default(true) }}"
 
   tasks:
     - name: Ensure migrator is present

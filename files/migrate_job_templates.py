@@ -19,6 +19,7 @@ Bulk:
 import argparse
 import os
 import sys
+import datetime
 import re
 import json
 from typing import Any, Dict, Iterable, Optional, Tuple, Pattern, List
@@ -28,6 +29,9 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TIMEOUT = 30
+
+RRULE_DT_RE = re.compile(r"DTSTART[:;]", re.IGNORECASE)
+RRULE_RULE_RE = re.compile(r"\bRRULE:", re.IGNORECASE)
 
 SAFE_SCHEDULE_KEYS = {
     "name", "rrule", "enabled", "unified_job_template", "timezone",
@@ -162,30 +166,129 @@ def awx_jt_notifications(a: str, t: str, jtid: int, v: bool) -> Dict[str, List[D
 def awx_jt_schedules(a: str, t: str, jtid: int, v: bool) -> List[Dict[str, Any]]:
     return list(GET(f"{a}/api/v2/job_templates/{jtid}/schedules/?page_size=200", H(t), v).get("results", []))
 
-def schedule_payload_minimal(s: Dict[str, Any], jt_id: int) -> Dict[str, Any]:
+def iso_to_ics_dtstart(dt: str) -> str:
     """
-    Build a minimal, Controller-safe schedule payload. We do not pass unknown/readonly fields.
+    Convert ISO8601 ('2025-10-16T14:00:00Z' or with offset) to ICS DTSTART (UTC Z).
     """
+    try:
+        # Handle both Z and offset formats
+        if dt.endswith("Z"):
+            d = datetime.datetime.fromisoformat(dt.replace("Z", "+00:00"))
+        else:
+            d = datetime.datetime.fromisoformat(dt)
+        d = d.astimezone(datetime.timezone.utc)
+        return d.strftime("%Y%m%dT%H%M%SZ")
+    except Exception:
+        return ""
+
+def normalize_rrule(raw_rrule: str, next_run: Optional[str], timezone: Optional[str]) -> Tuple[str, Optional[str]]:
+    """
+    Ensure RRULE string is acceptable by Controller:
+      - Ensure DTSTART exists (craft from next_run if missing)
+      - Ensure there's a newline between DTSTART and RRULE sections
+    Return (fixed_rrule, tz) where tz is passed separately if present.
+    """
+    r = (raw_rrule or "").strip()
+    if not r:
+        return r, timezone
+
+    has_dtstart = bool(RRULE_DT_RE.search(r))
+    has_rrule = bool(RRULE_RULE_RE.search(r))
+
+    # If 'DTSTART:...' and 'RRULE:...' are on one line separated by a space, split into lines
+    r = r.replace("DTSTART:", "DTSTART:")  # no-op, keeps intent clear
+    # Normalize any accidental 'DTSTART... RRULE...' to have a newline
+    r = re.sub(r"(DTSTART[^\n]+)\s+(RRULE:)", r"\\1\n\\2", r, flags=re.IGNORECASE)
+
+    if not has_dtstart:
+        # Try to build DTSTART from AWX 'next_run'
+        if next_run:
+            dt = iso_to_ics_dtstart(next_run)
+            if dt:
+                prefix = f"DTSTART:{dt}"
+                # If RRULE: present, ensure it's on its own line after DTSTART
+                if has_rrule:
+                    # Make sure 'RRULE:' begins on a new line
+                    r = RRULE_RULE_RE.sub("\nRRULE:", r) if not r.startswith("RRULE:") else r
+                    if not r.startswith("RRULE:") and not r.upper().startswith("DTSTART:"):
+                        r = f"{prefix}\n{r}"
+                    elif r.upper().startswith("RRULE:"):
+                        r = f"{prefix}\n{r}"
+                else:
+                    # No RRULE keyword? Pass through as-is (Controller will reject, we’ll log)
+                    r = f"{prefix}\n{r}"
+        # else: leave as-is; creation may fail and we’ll log the server message
+
+    return r, timezone
+
+def schedule_payload_minimal(s: Dict[str, Any], jt_id: int, aap_host: str) -> Dict[str, Any]:
+    """
+    Build the primary payload we attempt first.
+    """
+    fixed_rrule, tz = normalize_rrule(s.get("rrule", ""), s.get("next_run") or s.get("next_run_original"), s.get("timezone"))
     p: Dict[str, Any] = {
         "name": s.get("name", ""),
-        "rrule": s.get("rrule", ""),
         "enabled": bool(s.get("enabled", True)),
-        "unified_job_template": jt_id,
+        "unified_job_template": jt_id,  # first attempt: numeric id
+        "rrule": fixed_rrule,
     }
-    # Optional fields if present and non-empty
-    if s.get("timezone"):             p["timezone"] = s["timezone"]
-    if s.get("extra_data"):           p["extra_data"] = s["extra_data"]
-    if s.get("inventory"):            p["inventory"] = s["inventory"]
-    if s.get("scm_branch"):           p["scm_branch"] = s["scm_branch"]
-    if s.get("limit"):                p["limit"] = s["limit"]
-    if s.get("job_tags"):             p["job_tags"] = s["job_tags"]
-    if s.get("skip_tags"):            p["skip_tags"] = s["skip_tags"]
+    if tz: p["timezone"] = tz
+    if s.get("extra_data"):            p["extra_data"] = s["extra_data"]
+    if s.get("inventory"):             p["inventory"] = s["inventory"]
+    if s.get("scm_branch"):            p["scm_branch"] = s["scm_branch"]
+    if s.get("limit"):                 p["limit"] = s["limit"]
+    if s.get("job_tags"):              p["job_tags"] = s["job_tags"]
+    if s.get("skip_tags"):             p["skip_tags"] = s["skip_tags"]
     if s.get("verbosity") is not None: p["verbosity"] = int(s.get("verbosity") or 0)
     if s.get("forks") is not None:     p["forks"] = int(s.get("forks") or 0)
     if s.get("timeout") is not None:   p["timeout"] = int(s.get("timeout") or 0)
     if s.get("execution_environment"): p["execution_environment"] = s["execution_environment"]
-    # Filter to safe keys only (defense-in-depth)
-    return {k: v for k, v in p.items() if k in SAFE_SCHEDULE_KEYS}
+    return p
+
+def schedule_payload_bareminimum(s: Dict[str, Any], jt_id: int, aap_host: str) -> Dict[str, Any]:
+    """
+    Fallback payload: only the absolutely necessary fields.
+    If id form fails, we try URL form for unified_job_template.
+    """
+    fixed_rrule, tz = normalize_rrule(s.get("rrule", ""), s.get("next_run") or s.get("next_run_original"), s.get("timezone"))
+    p: Dict[str, Any] = {
+        "name": s.get("name", ""),
+        "enabled": bool(s.get("enabled", True)),
+        "unified_job_template": jt_id,
+        "rrule": fixed_rrule,
+    }
+    if tz: p["timezone"] = tz
+    return p
+
+def try_create_schedule(aap_host: str, aap_tok: str, verify: bool, jt_id: int, s: Dict[str, Any]) -> bool:
+    """
+    Try creating a schedule with:
+      1) normal payload (UJT id)
+      2) normal payload but UJT URL
+      3) bare-minimum payload (UJT id)
+      4) bare-minimum payload but UJT URL
+    Returns True on success, False otherwise (error already printed).
+    """
+    def with_ujt_url(payload: Dict[str, Any]) -> Dict[str, Any]:
+        u = f"{aap_host}/api/controller/v2/job_templates/{jt_id}/"
+        q = dict(payload)
+        q["unified_job_template"] = u
+        return q
+
+    payloads = [
+        schedule_payload_minimal(s, jt_id, aap_host),
+        with_ujt_url(schedule_payload_minimal(s, jt_id, aap_host)),
+        schedule_payload_bareminimum(s, jt_id, aap_host),
+        with_ujt_url(schedule_payload_bareminimum(s, jt_id, aap_host)),
+    ]
+
+    for idx, pl in enumerate(payloads, start=1):
+        try:
+            POST(f"{aap_host}/api/controller/v2/schedules/", H(aap_tok), pl, verify)
+            return True
+        except Exception as e:
+            print(f"    attempt {idx} failed creating schedule '{pl.get('name','')}' -> {e}")
+    return False
 
 # ---------------- AAP lookups & asserts ----------------
 def q_one(aap: str, tok: str, endpoint: str, name: str, org: int, v: bool) -> Optional[Dict[str, Any]]:
@@ -538,20 +641,22 @@ def migrate_one(args: argparse.Namespace, obj: Dict[str, Any],
         schedules = awx_jt_schedules(args.awx_host, args.awx_token, obj['id'], args.verify_tls)
         created_cnt = 0
         for s in schedules:
-            sp = schedule_payload_minimal(s, jt_id)
-            if not sp.get("rrule"):
-                print(f"  WARN: schedule '{s.get('name','')}' missing rrule; skipped")
+            # quick sanity
+            raw_rrule = (s.get("rrule") or "").strip()
+            if not raw_rrule:
+                print(f"  WARN: schedule '{s.get('name','')}' has empty rrule; skipped")
                 continue
             if args.dry_run:
-                print(f"  DRY-RUN: would create schedule '{sp.get('name','')}'")
+                print(f"  DRY-RUN: would create schedule '{s.get('name','')}'")
                 created_cnt += 1
                 continue
-            try:
-                POST(f"{args.aap_host}/api/controller/v2/schedules/", H(args.aap_token), sp, args.verify_tls)
+            ok = try_create_schedule(args.aap_host, args.aap_token, args.verify_tls, jt_id, s)
+            if ok:
                 created_cnt += 1
-            except Exception as e:
-                print(f"  WARN: failed to create schedule '{sp.get('name','')}': {e}")
-        # verify
+            else:
+                print(f"  WARN: giving up on schedule '{s.get('name','')}' after 4 attempts")
+
+        # verify on AAP
         try:
             aap_scheds = GET(f"{args.aap_host}/api/controller/v2/job_templates/{jt_id}/schedules/?page_size=200",
                              H(args.aap_token), args.verify_tls)
