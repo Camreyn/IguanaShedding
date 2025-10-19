@@ -19,7 +19,7 @@ Bulk:
 import argparse
 import os
 import sys
-import datetime
+import datetime as dt
 import re
 import json
 from typing import Any, Optional, Dict, Iterable, Optional, Tuple, Pattern, List
@@ -191,10 +191,10 @@ def iso_to_ics_dtstart(dt: str) -> str:
     try:
         # Handle both Z and offset formats
         if dt.endswith("Z"):
-            d = datetime.datetime.fromisoformat(dt.replace("Z", "+00:00"))
+            d = dt.datetime.fromisoformat(dt.replace("Z", "+00:00"))
         else:
-            d = datetime.datetime.fromisoformat(dt)
-        d = d.astimezone(datetime.timezone.utc)
+            d = dt.datetime.fromisoformat(dt)
+        d = d.astimezone(dt.timezone.utc)
         return d.strftime("%Y%m%dT%H%M%SZ")
     except Exception:
         return ""
@@ -239,11 +239,11 @@ def _canon_tz(tz: Optional[str]) -> Optional[str]:
     except Exception:
         return None
     
-def _parse_iso(dt: str) -> Optional[datetime.datetime]:
+def _parse_iso(dt: str) -> Optional[dt.datetime]:
     try:
         if dt.endswith("Z"):
-            return datetime.datetime.fromisoformat(dt.replace("Z", "+00:00"))
-        return datetime.datetime.fromisoformat(dt)
+            return dt.datetime.fromisoformat(dt.replace("Z", "+00:00"))
+        return dt.datetime.fromisoformat(dt)
     except Exception:
         return None
     
@@ -252,7 +252,7 @@ def _mk_dtstart(next_run_iso: Optional[str], tz: Optional[str]) -> str:
     Build a valid DTSTART line. Prefer TZ-aware DTSTART if tz is valid; else UTC Z.
     If next_run_iso missing/bad, use current UTC to satisfy Controller.
     """
-    d = _parse_iso(next_run_iso) or datetime.datetime.now(datetime.timezone.utc)
+    d = _parse_iso(next_run_iso) or dt.datetime.now(dt.timezone.utc)
     tz_canon = _canon_tz(tz)
     if tz_canon:
         try:
@@ -261,7 +261,7 @@ def _mk_dtstart(next_run_iso: Optional[str], tz: Optional[str]) -> str:
             return f"DTSTART;TZID={tz_canon}:{d_local.strftime('%Y%m%dT%H%M%S')}"
         except Exception:
             pass
-    d_utc = d.astimezone(datetime.timezone.utc)
+    d_utc = d.astimezone(dt.timezone.utc)
     return f"DTSTART:{d_utc.strftime('%Y%m%dT%H%M%SZ')}"
 
 def _clean_rrule_line(rrule_line: str) -> str:
