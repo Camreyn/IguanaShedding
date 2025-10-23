@@ -1,41 +1,89 @@
-- name: Migrate AWX projects to AAP (ATST or PROD mode)
+---
+- name: Export ATST project index (artifact)
   hosts: pilotserver
   gather_facts: no
   vars:
-    # Existing survey inputs
     awx_host: "{{ survey_awx_host }}"
     awx_token: "{{ survey_awx_token }}"
-    aap_host: "{{ survey_aap_host }}"
-    aap_token: "{{ survey_aap_token }}"
-    organization_id: "{{ survey_aap_organization_id }}"
-    include_regex: "{{ survey_include_regex | default('') }}"
-    exclude_regex: "{{ survey_exclude_regex | default('') }}"
-    dry_run: "{{ survey_dry_run | default(false) }}"
     verify_tls: "{{ survey_verify_tls | default(false) }}"
-
-    # New survey inputs for PROD comparison/migration
-    is_prod_mode: "{{ survey_is_prod_mode | default(false) }}"
-    prod_awx_host: "{{ survey_prod_awx_host | default('') }}"
-    prod_awx_token: "{{ survey_prod_awx_token | default('') }}"
-    prod_name_prefix: "{{ survey_prod_name_prefix | default('PROD_') }}"
-    receipt_out: "{{ survey_receipt_out | default('migrate_projects_receipt.txt') }}"
+    artifacts_dir: "{{ survey_artifacts_dir | default('artifacts') }}"
+    atst_index_name: "{{ survey_atst_index_name | default('atst_project_index.json') }}"
   tasks:
-    - copy:
+    - name: Ensure artifacts dir on controller
+      delegate_to: localhost
+      run_once: true
+      file:
+        path: "{{ artifacts_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Ship script to pilotserver
+      copy:
         src: files/migrate_projects.py
         dest: ./migrate_projects.py
         mode: '0755'
 
-    - name: Run migration (ATST single-source OR PROD compare mode)
+    - name: Export ATST index JSON on pilotserver
       command: >
         python3 migrate_projects.py
         --awx-host {{ awx_host }} --awx-token {{ awx_token }}
+        --export-awx-index {{ atst_index_name }}
+        {% if verify_tls %}--verify-tls{% endif %}
+
+    - name: Fetch ATST index artifact to controller
+      fetch:
+        src: "{{ atst_index_name }}"
+        dest: "{{ artifacts_dir }}/{{ atst_index_name }}"
+        flat: yes
+
+- name: Migrate AWX projects to AAP (PROD compare; offline ATST index)
+  hosts: prod_server
+  gather_facts: no
+  vars:
+    artifacts_dir: "{{ survey_artifacts_dir | default('artifacts') }}"
+    atst_index_name: "{{ survey_atst_index_name | default('atst_project_index.json') }}"
+    aap_host: "{{ survey_aap_host }}"
+    aap_token: "{{ survey_aap_token }}"
+    organization_id: "{{ survey_aap_organization_id }}"
+    verify_tls: "{{ survey_verify_tls | default(false) }}"
+    dry_run: "{{ survey_dry_run | default(false) }}"
+    prod_awx_host: "{{ survey_prod_awx_host }}"
+    prod_awx_token: "{{ survey_prod_awx_token }}"
+    prod_name_prefix: "{{ survey_prod_name_prefix | default('PROD_') }}"
+    receipt_out: "{{ survey_receipt_out | default('migrate_projects_receipt.txt') }}"
+    include_regex: "{{ survey_include_regex | default('') }}"
+    exclude_regex: "{{ survey_exclude_regex | default('') }}"
+  tasks:
+    - name: Ship script to prod_server
+      copy:
+        src: files/migrate_projects.py
+        dest: ./migrate_projects.py
+        mode: '0755'
+
+    - name: Copy ATST index artifact from controller to prod_server
+      copy:
+        src: "{{ artifacts_dir }}/{{ atst_index_name }}"
+        dest: "./{{ atst_index_name }}"
+        mode: '0644'
+
+    - name: Run PROD compare/migrate using offline ATST index
+      command: >
+        python3 migrate_projects.py
         --aap-host {{ aap_host }} --aap-token {{ aap_token }}
         --organization-id {{ organization_id }}
-        {% if is_prod_mode %}--prod-mode
+        --prod-mode
         --prod-awx-host {{ prod_awx_host }} --prod-awx-token {{ prod_awx_token }}
+        --atst-index-file {{ atst_index_name }}
         --prod-prefix "{{ prod_name_prefix }}"
-        --receipt-out "{{ receipt_out }}"{% else %}--all{% endif %}
+        --receipt-out "{{ receipt_out }}"
         {% if include_regex %}--include "{{ include_regex }}"{% endif %}
         {% if exclude_regex %}--exclude "{{ exclude_regex }}"{% endif %}
         {% if dry_run %}--dry-run{% endif %}
         {% if verify_tls %}--verify-tls{% endif %}
+
+    - name: Fetch receipt from prod_server
+      fetch:
+        src: "{{ receipt_out }}"
+        dest: "{{ artifacts_dir }}/{{ inventory_hostname }}_{{ receipt_out | basename }}"
+        flat: yes
+      ignore_errors: yes
