@@ -1,7 +1,8 @@
-- name: Migrate all AWX projects to AAP
+- name: Migrate AWX projects to AAP (ATST or PROD mode)
   hosts: pilotserver
   gather_facts: no
   vars:
+    # Existing survey inputs
     awx_host: "{{ survey_awx_host }}"
     awx_token: "{{ survey_awx_token }}"
     aap_host: "{{ survey_aap_host }}"
@@ -11,17 +12,29 @@
     exclude_regex: "{{ survey_exclude_regex | default('') }}"
     dry_run: "{{ survey_dry_run | default(false) }}"
     verify_tls: "{{ survey_verify_tls | default(false) }}"
+
+    # New survey inputs for PROD comparison/migration
+    is_prod_mode: "{{ survey_is_prod_mode | default(false) }}"
+    prod_awx_host: "{{ survey_prod_awx_host | default('') }}"
+    prod_awx_token: "{{ survey_prod_awx_token | default('') }}"
+    prod_name_prefix: "{{ survey_prod_name_prefix | default('PROD_') }}"
+    receipt_out: "{{ survey_receipt_out | default('migrate_projects_receipt.txt') }}"
   tasks:
     - copy:
         src: files/migrate_projects.py
         dest: ./migrate_projects.py
         mode: '0755'
-    - command: >
+
+    - name: Run migration (ATST single-source OR PROD compare mode)
+      command: >
         python3 migrate_projects.py
         --awx-host {{ awx_host }} --awx-token {{ awx_token }}
         --aap-host {{ aap_host }} --aap-token {{ aap_token }}
         --organization-id {{ organization_id }}
-        --all
+        {% if is_prod_mode %}--prod-mode
+        --prod-awx-host {{ prod_awx_host }} --prod-awx-token {{ prod_awx_token }}
+        --prod-prefix "{{ prod_name_prefix }}"
+        --receipt-out "{{ receipt_out }}"{% else %}--all{% endif %}
         {% if include_regex %}--include "{{ include_regex }}"{% endif %}
         {% if exclude_regex %}--exclude "{{ exclude_regex }}"{% endif %}
         {% if dry_run %}--dry-run{% endif %}
