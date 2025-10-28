@@ -6,8 +6,22 @@
     awx_host: "{{ survey_awx_host }}"
     awx_token: "{{ survey_awx_token }}"
     verify_tls: "{{ survey_verify_tls | default(false) }}"
+
     artifacts_dir: "{{ survey_artifacts_dir | default('artifacts') }}"
     atst_index_name: "{{ survey_atst_index_name | default('atst_project_index.json') }}"
+
+    # No change: keep these survey vars, even if unused in this phase
+    aap_host: "{{ survey_aap_host }}"
+    aap_token: "{{ survey_aap_token }}"
+    organization_id: "{{ survey_aap_organization_id }}"
+    include_regex: "{{ survey_include_regex | default('') }}"
+    exclude_regex: "{{ survey_exclude_regex | default('') }}"
+    dry_run: "{{ survey_dry_run | default(false) }}"
+    is_prod_mode: "{{ survey_is_prod_mode | default(false) }}"
+    prod_awx_host: "{{ survey_prod_awx_host | default('') }}"
+    prod_awx_token: "{{ survey_prod_awx_token | default('') }}"
+    prod_name_prefix: "{{ survey_prod_name_prefix | default('PROD_') }}"
+    receipt_out: "{{ survey_receipt_out | default('migrate_projects_receipt.txt') }}"
   tasks:
     - name: Ensure artifacts dir on controller
       delegate_to: localhost
@@ -26,6 +40,8 @@
     - name: Export ATST index JSON on pilotserver
       command: >
         python3 migrate_projects.py
+        --aap-host {{ aap_host }} --aap-token {{ aap_token }}
+        --organization-id {{ organization_id }}
         --awx-host {{ awx_host }} --awx-token {{ awx_token }}
         --export-awx-index {{ atst_index_name }}
         {% if verify_tls %}--verify-tls{% endif %}
@@ -40,19 +56,22 @@
   hosts: prod_server
   gather_facts: no
   vars:
-    artifacts_dir: "{{ survey_artifacts_dir | default('artifacts') }}"
-    atst_index_name: "{{ survey_atst_index_name | default('atst_project_index.json') }}"
     aap_host: "{{ survey_aap_host }}"
     aap_token: "{{ survey_aap_token }}"
     organization_id: "{{ survey_aap_organization_id }}"
     verify_tls: "{{ survey_verify_tls | default(false) }}"
     dry_run: "{{ survey_dry_run | default(false) }}"
+
     prod_awx_host: "{{ survey_prod_awx_host }}"
     prod_awx_token: "{{ survey_prod_awx_token }}"
     prod_name_prefix: "{{ survey_prod_name_prefix | default('PROD_') }}"
     receipt_out: "{{ survey_receipt_out | default('migrate_projects_receipt.txt') }}"
+
     include_regex: "{{ survey_include_regex | default('') }}"
     exclude_regex: "{{ survey_exclude_regex | default('') }}"
+
+    artifacts_dir: "{{ survey_artifacts_dir | default('artifacts') }}"
+    atst_index_name: "{{ survey_atst_index_name | default('atst_project_index.json') }}"
   tasks:
     - name: Ship script to prod_server
       copy:
