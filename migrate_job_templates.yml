@@ -21,6 +21,7 @@
     with_notifications: "{{ survey_with_notifications | default(true) }}"
     notif_secrets_file: "{{ survey_notif_secrets_file | default('') }}"
     with_schedules: "{{ survey_with_schedules | default(true) }}"
+    schedules_only: "{{ survey_schedules_only | default(false) }}"
 
   tasks:
     - name: Ensure migrator is present
@@ -48,6 +49,7 @@
             + ( ['--with-notifications'] if with_notifications | default(false) | bool else [] )
             + ( ['--notif-secrets-file', notif_secrets_file] if (notif_secrets_file | default('') | string | length) > 0 else [] )
             + ( ['--with-schedules'] if with_schedules | default(false) | bool else [] )
+            + ( ['--schedules-only'] if schedules_only | default(false) | bool else [] )
             + ( ['--dry-run'] if (dry_run | default(false) | bool) else [] )
             + ( ['--verify-tls'] if (verify_tls | default(false) | bool) else [] )
           }}
