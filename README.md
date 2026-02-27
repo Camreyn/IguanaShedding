@@ -72,19 +72,3 @@ Because you already migrated TEST months ago, use the API-driven playbooks for P
 
 This is the safest path to avoid creating duplicates while still bringing across PROD-only content.
 
-## Move only PROD scheduled jobs
-
-If you only want schedules from PROD AWX (and do **not** want to create/update JTs or projects), run `migrate_job_templates.yml` with:
-
-- `survey_awx_host` / `survey_awx_token` set to PROD AWX
-- `survey_with_schedules=true`
-- `survey_schedules_only=true`
-- optional `survey_include_regex` / `survey_exclude_regex` for phased batches
-
-Behavior in `schedules_only` mode:
-
-- Requires the target JT already exists in AAP (matched by `name + organization`).
-- Skips JTs that do not already exist in AAP.
-- Skips survey, credential, and notification changes.
-- Migrates schedules only.
-- Skips schedule creation when a schedule with the same name already exists on that AAP JT.
