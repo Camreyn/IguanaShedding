@@ -95,6 +95,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--with-notifications', action='store_true', help='Migrate and attach EMAIL notification templates')
     p.add_argument('--notif-secrets-file', help='YAML/JSON for redacted email fields, keyed by notif name')
     p.add_argument('--with-schedules', action='store_true', help='Migrate schedules of each JT')
+    p.add_argument(
+        '--schedules-only',
+        action='store_true',
+        help='Only migrate schedules onto existing AAP JTs; do not create JTs or change survey/credentials/notifications.'
+    )
 
     return p.parse_args()
 
@@ -405,6 +410,17 @@ def try_create_schedule(aap_host: str, aap_tok: str, verify: bool,
         except Exception as e:
             diag = {k: pl.get(k) for k in ("name","unified_job_template","timezone","rrule","inventory","limit")}
             emit("schedule.create.fail", attempt=idx, variant=label, payload=diag, error=str(e))
+    return False
+
+
+def aap_schedule_exists(aap_host: str, aap_tok: str, verify: bool, jt_id: int, schedule_name: str) -> bool:
+    u = f"{aap_host}/api/controller/v2/job_templates/{jt_id}/schedules/?page_size=200"
+    while u:
+        d = GET(u, H(aap_tok), verify)
+        for obj in d.get("results", []):
+            if obj.get("name") == schedule_name:
+                return True
+        u = d.get("next")
     return False
 
 def sanitize_timezone(tz: Optional[str]) -> Optional[str]:
@@ -781,6 +797,9 @@ def migrate_one(args: argparse.Namespace, obj: Dict[str, Any],
         # If you prefer to skip updates on existing JTs, uncomment next line:
         # print(f"SKIP (exists): {name} -> AAP id {jt_id}"); return
     else:
+        if args.schedules_only:
+            print(f"SKIP (schedules-only, JT missing in AAP): {name}")
+            return
         payload = jt_payload_from_awx(obj, args.organization_id, proj_id, inv_id, ee_id)
         if args.dry_run:
             print(f"DRY-RUN (create JT): {name}  [EE id {args.force_ee_id}]")
@@ -794,8 +813,12 @@ def migrate_one(args: argparse.Namespace, obj: Dict[str, Any],
     if jt_id is None:
         raise RuntimeError(f"Internal error: jt_id not set for template '{name}'")
 
+    # In schedules-only mode, skip non-schedule resources entirely.
+    if args.schedules_only:
+        print("  schedules-only mode: skipping survey/credentials/notifications")
+
     # Survey: POST spec then enable
-    if survey_spec:
+    if survey_spec and not args.schedules_only:
         if args.dry_run:
             print("  DRY-RUN: would POST survey_spec and enable survey")
         else:
@@ -813,7 +836,7 @@ def migrate_one(args: argparse.Namespace, obj: Dict[str, Any],
 
     # Credentials
     creds = list(awx_jt_creds(args.awx_host, args.awx_token, obj['id'], args.verify_tls))
-    if creds:
+    if creds and not args.schedules_only:
         if args.dry_run:
             print("  DRY-RUN: would attach credentials")
         else:
@@ -824,7 +847,7 @@ def migrate_one(args: argparse.Namespace, obj: Dict[str, Any],
             print(f"  Attached {len(ids)} credential(s)")
 
     # Notifications (email)
-    if args.with_notifications:
+    if args.with_notifications and not args.schedules_only:
         notifs = awx_jt_notifications(args.awx_host, args.awx_token, obj['id'], args.verify_tls)
         if any(notifs.values()):
             if args.dry_run:
@@ -838,12 +861,18 @@ def migrate_one(args: argparse.Namespace, obj: Dict[str, Any],
     if args.with_schedules:
         schedules = awx_jt_schedules(args.awx_host, args.awx_token, obj['id'], args.verify_tls)
         created_cnt = 0
+        skipped_existing = 0
         for s in schedules:
             nm = s.get("name","")
             raw = (s.get("rrule") or "").strip()
             if not raw:
                 print(f"  WARN: schedule '{nm}' has empty rrule; skipped")
                 emit("schedule.skip.empty_rrule", name=nm)
+                continue
+            if aap_schedule_exists(args.aap_host, args.aap_token, args.verify_tls, jt_id, nm):
+                print(f"  SKIP existing schedule: '{nm}'")
+                emit("schedule.skip.exists", name=nm)
+                skipped_existing += 1
                 continue
             if args.dry_run:
                 print(f"  DRY-RUN: would create schedule '{nm}' (force JT inventory, keep limit)")
@@ -862,8 +891,8 @@ def migrate_one(args: argparse.Namespace, obj: Dict[str, Any],
             aap_scheds = GET(f"{args.aap_host}/api/controller/v2/job_templates/{jt_id}/schedules/?page_size=200",
                              H(args.aap_token), args.verify_tls)
             total = len(aap_scheds.get("results", []))
-            print(f"  Schedules created: {created_cnt}; AAP currently shows {total}")
-            emit("schedule.verify", created=created_cnt, aap_count=total)
+            print(f"  Schedules created: {created_cnt}; existing skipped: {skipped_existing}; AAP currently shows {total}")
+            emit("schedule.verify", created=created_cnt, skipped_existing=skipped_existing, aap_count=total)
         except Exception as _e:
             print(f"  WARN: schedule verification fetch failed: {_e}")
             emit("schedule.verify.fail", error=str(_e))
@@ -873,6 +902,9 @@ def main() -> int:
     args = parse_args()
     args.awx_host = norm(args.awx_host); args.aap_host = norm(args.aap_host)
     ping(args.aap_host, args.aap_token, args.verify_tls)
+
+    if args.schedules_only and not args.with_schedules:
+        raise SystemExit("--schedules-only requires --with-schedules")
 
     # Single vs bulk
     template_id = args.template_id
